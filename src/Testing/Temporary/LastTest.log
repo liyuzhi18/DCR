@@ -1,0 +1,45 @@
+Start testing: Feb 10 15:45 EST
+----------------------------------------------------------
+1/2 Testing: StructureCheck
+1/2 Test: StructureCheck
+Command: "/Users/asimida/Desktop/DCR_code/src/bin/check_structure"
+Directory: /Users/asimida/Desktop/DCR_code/src
+"StructureCheck" start time: Feb 10 15:45 EST
+Output:
+----------------------------------------------------------
+--- DCR Solver Structure Test ---
+[PASS] Base Types: dcr::base::Real is valid (size=8).
+[PASS] Eigen Linkage: Vector math works (NormSq=14)
+--- All Checks Passed ---
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"StructureCheck" end time: Feb 10 15:45 EST
+"StructureCheck" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/2 Testing: PhysicsCheck
+2/2 Test: PhysicsCheck
+Command: "/Users/asimida/Desktop/DCR_code/src/bin/check_physics"
+Directory: /Users/asimida/Desktop/DCR_code/src
+"PhysicsCheck" start time: Feb 10 15:45 EST
+Output:
+----------------------------------------------------------
+--- Testing Physics Module (CGS Units) ---
+  Calculated c_s (D, 10eV): 2.1885e+06 cm/s
+  Expected   c_s          : 2.1964e+06 cm/s
+[PASS] Bohm Speed logic is correct.
+
+  Calculated v_th (D, 0.1eV): 3.4923e+05 cm/s
+  Expected   v_th           : 3.5040e+05 cm/s
+[PASS] Thermal Speed logic is correct.
+<end of output>
+Test time =   0.08 sec
+----------------------------------------------------------
+Test Passed.
+"PhysicsCheck" end time: Feb 10 15:45 EST
+"PhysicsCheck" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Feb 10 15:45 EST

@@ -1,0 +1,2 @@
+/usr/bin/ar qc libdcr_solver.a CMakeFiles/dcr_solver.dir/solver/DCR_Solver.cpp.o CMakeFiles/dcr_solver.dir/solver/WallBoundary.cpp.o
+/usr/bin/ranlib libdcr_solver.a

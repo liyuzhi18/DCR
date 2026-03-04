@@ -1,0 +1,36 @@
+22
+7	0	1	1	2	1	1	1	2	1	N_H_7_n_1.txt
+7	0	2	1	3	1	1	1	2	1	N_H_7_n_2.txt
+7	0	3	1	4	1	1	1	2	1	N_H_7_n_3.txt
+7	0	4	1	5	1	1	1	2	1	N_H_7_n_4.txt
+7	0	5	1	6	1	1	1	2	1	N_H_7_n_5.txt
+7	0	6	1	7	1	1	1	2	1	N_H_7_n_6.txt
+7	1	1	2	12	1	1	1	2	1	N_H_6_n_1.txt
+7	1	2	2	13	1	1	1	2	1	N_H_6_n_2.txt
+7	1	3	2	14	1	1	1	2	1	N_H_6_n_3.txt
+7	1	4	2	15	1	1	1	2	1	N_H_6_n_4.txt
+7	1	5	2	16	1	1	1	2	1	N_H_6_n_5.txt
+7	2	2	12	31	1	1	1	2	1	N_H_5_n_2.txt
+7	2	3	12	32	1	1	1	2	1	N_H_5_n_3.txt
+7	2	4	12	33	1	1	1	2	1	N_H_5_n_4.txt
+7	3	2	31	49	1	1	1	2	1	N_H_4_n_2.txt
+7	3	3	31	50	1	1	1	2	1	N_H_4_n_3.txt
+7	3	5	31	51	1	1	1	2	1	N_H_4_n_4.txt
+7	4	2	49	75	1	1	1	2	1	N_H_3_n_2.txt
+7	4	3	49	76	1	1	1	2	1	N_H_3_n_3.txt
+7	5	2	75	101	1	1	1	2	1	N_H_2_n_2.txt
+7	6	2	101	127	1	1	1	2	1	N_H_1_n_2.txt
+7	7	2	127	101	1	0	1	1	2	N_H_0_n_2.txt
+**************************************************************
+Column
+1st------ Z-Target (Atomic Number)
+2nd------ Target-Initial-Number of electron
+3rd------ Target n-state of the captured electron
+4th------ Target-Initial state number (from sclit.**)
+5th------ Target-Final state number (from sclit.**)
+6th------ Z-Beam (Atomic Number)
+7th------ Beam-Initital-Number of electron
+8th------ Beam n-state of the captured electron
+9th------ Beam-Initial state number (from sclit.**)
+10th----- Beam-Final state number (from sclit.**)
+11th----- Cross-section data [eV v/s 1e-16 cm^2] (should be stored in /atomic_data/CX/data/)

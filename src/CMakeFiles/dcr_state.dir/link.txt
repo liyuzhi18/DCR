@@ -1,0 +1,2 @@
+/usr/bin/ar qc libdcr_state.a CMakeFiles/dcr_state.dir/state/Mesh.cpp.o CMakeFiles/dcr_state.dir/state/PlasmaState.cpp.o
+/usr/bin/ranlib libdcr_state.a

@@ -1,0 +1,37 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "DCR Main (Fast LLDB)",
+      "type": "lldb",
+      "request": "launch",
+      "preLaunchTask": "Build build-debug",
+      "program": "${workspaceFolder}/build-debug/bin/DCR_Main",
+      "args": ["${workspaceFolder}/config/hydro_am.yaml"],
+      "cwd": "${workspaceFolder}",
+      "stopOnEntry": false,
+      "expressions": "simple",
+      "initCommands": [
+        "settings set target.max-children-count 20",
+        "settings set target.max-string-summary-length 64",
+        "settings set target.max-memory-read-size 2048"
+      ]
+    },
+    {
+      "name": "DCR Main (cppdbg fallback)",
+      "type": "cppdbg",
+      "request": "launch",
+      "preLaunchTask": "Build build-debug",
+      "program": "${workspaceFolder}/build-debug/bin/DCR_Main",
+      "args": ["${workspaceFolder}/config/hydro_am.yaml"],
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "MIMode": "lldb",
+      "initCommands": [
+        "settings set target.max-children-count 50",
+        "settings set target.max-string-summary-length 80",
+        "settings set target.max-memory-read-size 4096"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+io:
+  output_dir: output/test_run_T2eV
+  atomic_data_root: atomic_data/
+  data_tables_root: data_tables/
+  verbose_logging: true
+species:
+- name: H_Atom
+  filename: sclit.01
+  is_molecule: false
+- name: H2_Molecule
+  filename: sclit_M.01
+  is_molecule: true
+grid:
+  length_cm: 1.0
+  num_cells: 100
+  type: log
+  first_cell_cm: 0.001
+  poloidal_width_cm: 1.0
+plasma:
+  total_density_cm3: 1e14
+  Te_eV: 2.0
+  Ti_eV: 2.0
+  neutral_atom_temperature_eV: 0.1
+  neutral_molecule_temperature_eV: 0.1
+  initial_conditions:
+  - index: 0
+    fraction: 0.2
+  - index: 1
+    fraction: 0.6
+  - index: 31
+    fraction: 0.1
+wall:
+  material: W
+  sheath_potential_drop: 4.0
+  temperature_eV: 0.1
+numerics:
+  tolerance: 1.0e-08
+  max_iterations: 1000
+  relaxation: 0.9
