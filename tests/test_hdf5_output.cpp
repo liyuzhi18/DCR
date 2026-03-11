@@ -41,13 +41,14 @@ int main() {
 
     dcr::atomic::AtomicData atomic_data(cfg);
     auto plasma = test_dcr::make_plasma_state(cfg, atomic_data.get_total_states());
-    test_dcr::EEDFContext eedf(cfg.plasma.Te_eV);
+    const auto boundary_temperatures = test_dcr::plasma_temperatures_at(cfg, 0.0);
+    test_dcr::EEDFContext eedf(boundary_temperatures.electron_eV);
 
     const double ion_mass_amu = test_dcr::estimate_ion_mass_amu(cfg);
     const auto wall = dcr::physics::compute_wall_recycling(
         cfg.wall.material,
-        cfg.plasma.Te_eV,
-        cfg.plasma.Ti_eV,
+        boundary_temperatures.electron_eV,
+        boundary_temperatures.ion_eV,
         ion_mass_amu,
         cfg.wall.sheath_potential_drop
     );
@@ -76,6 +77,22 @@ int main() {
     assert(dataset_exists(file, "/population/flowA"));
     assert(dataset_exists(file, "/population/flowM"));
     assert(dataset_exists(file, "/population/total_full"));
+    assert(dataset_exists(file, "/rates/Te_eV"));
+    assert(dataset_exists(file, "/rates/Ti_eV"));
+    assert(dataset_exists(file, "/rates/ne_cm3"));
+    assert(dataset_exists(file, "/rates/atomic_scd_cm3_s"));
+    assert(dataset_exists(file, "/rates/atomic_acd_cm3_s"));
+    assert(dataset_exists(file, "/rates/atomic_qss_transport_frequency_s"));
+    assert(dataset_exists(file, "/rates/atomic_qss_max_transport_to_local_ratio"));
+    assert(dataset_exists(file, "/rates/atomic_qss_max_transport_to_loss_frequency_ratio"));
+    assert(dataset_exists(file, "/rates/atomic_excited_indices"));
+    assert(dataset_exists(file, "/rates/atomic_excited_labels"));
+    assert(dataset_exists(file, "/rates/atomic_excited_transport_rate_cm3_s"));
+    assert(dataset_exists(file, "/rates/atomic_excited_local_source_rate_cm3_s"));
+    assert(dataset_exists(file, "/rates/atomic_excited_local_loss_rate_cm3_s"));
+    assert(dataset_exists(file, "/rates/atomic_excited_local_loss_frequency_s"));
+    assert(dataset_exists(file, "/rates/atomic_excited_transport_to_local_ratio"));
+    assert(dataset_exists(file, "/rates/atomic_excited_transport_to_loss_frequency_ratio"));
 
     const auto d_x = dataset_dims(file.openDataSet("/grid/x_cm"));
     const auto d_n = dataset_dims(file.openDataSet("/grid/n_nuclei_cm3"));
@@ -84,11 +101,20 @@ int main() {
     const auto d_a = dataset_dims(file.openDataSet("/population/flowA"));
     const auto d_m = dataset_dims(file.openDataSet("/population/flowM"));
     const auto d_tot = dataset_dims(file.openDataSet("/population/total_full"));
+    const auto d_te = dataset_dims(file.openDataSet("/rates/Te_eV"));
+    const auto d_ti = dataset_dims(file.openDataSet("/rates/Ti_eV"));
+    const auto d_ne = dataset_dims(file.openDataSet("/rates/ne_cm3"));
+    const auto d_scd = dataset_dims(file.openDataSet("/rates/atomic_scd_cm3_s"));
+    const auto d_acd = dataset_dims(file.openDataSet("/rates/atomic_acd_cm3_s"));
+    const auto d_qss_transport = dataset_dims(file.openDataSet("/rates/atomic_qss_transport_frequency_s"));
+    const auto d_excited = dataset_dims(file.openDataSet("/rates/atomic_excited_indices"));
+    const auto d_excited_transport = dataset_dims(file.openDataSet("/rates/atomic_excited_transport_rate_cm3_s"));
 
     const hsize_t n_nodes = static_cast<hsize_t>(cfg.grid.num_cells);
     const hsize_t total_states = static_cast<hsize_t>(atomic_data.get_total_states());
     const hsize_t nA = static_cast<hsize_t>(boundary.A_indices.size());
     const hsize_t nM = static_cast<hsize_t>(boundary.M_indices.size());
+    const hsize_t n_excited = d_excited.empty() ? 0 : d_excited[0];
 
     assert(d_x.size() == 1 && d_x[0] == n_nodes);
     assert(d_n.size() == 1 && d_n[0] == n_nodes);
@@ -97,6 +123,16 @@ int main() {
     assert(d_a.size() == 2 && d_a[0] == n_nodes && d_a[1] == nA);
     assert(d_m.size() == 2 && d_m[0] == n_nodes && d_m[1] == nM);
     assert(d_tot.size() == 2 && d_tot[0] == n_nodes && d_tot[1] == total_states);
+    assert(d_te.size() == 1 && d_te[0] == n_nodes);
+    assert(d_ti.size() == 1 && d_ti[0] == n_nodes);
+    assert(d_ne.size() == 1 && d_ne[0] == n_nodes);
+    assert(d_scd.size() == 1 && d_scd[0] == n_nodes);
+    assert(d_acd.size() == 1 && d_acd[0] == n_nodes);
+    assert(d_qss_transport.size() == 1 && d_qss_transport[0] == n_nodes);
+    assert(d_excited.size() == 1 && n_excited > 0);
+    assert(d_excited_transport.size() == 2 &&
+           d_excited_transport[0] == n_nodes &&
+           d_excited_transport[1] == n_excited);
 
     std::cout << "[PASS] HDF5Output checks.\n";
     return 0;

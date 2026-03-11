@@ -1,5 +1,7 @@
 #include "LocalSystemAssembler.hpp"
 
+#include "../core/TemperatureProfile.hpp"
+
 #include <algorithm>
 
 namespace dcr::solver {
@@ -23,13 +25,15 @@ double quasineutral_electron_density(const dcr::base::Vector& population,
 
 // Build local matrix/source objects from the current iterate.
 LocalSystem assemble_local_system(
+    const dcr::io::Config& config,
     const dcr::atomic::AtomicData& atomic_data,
     const dcr::state::PlasmaState& plasma,
     const EEDFGridView& grid,
     const BoundaryPhaseResult& boundary,
     const dcr::base::Vector& background_population,
     const dcr::base::Vector& flowA,
-    const dcr::base::Vector& flowM) {
+    const dcr::base::Vector& flowM,
+    double x_cm) {
 
     LocalSystem out;
 
@@ -39,40 +43,69 @@ LocalSystem assemble_local_system(
         out.population_for_rates = dcr::base::Vector::Zero(total_states);
     }
 
-    // Build total population used in process-rate evaluation.
-    // Explicit recycling: dedicated flow states -> overwrite those entries.
-    // Implicit recycling: flow shares neutral indices -> add onto background entries.
-    for (size_t i = 0; i < boundary.A_indices.size(); ++i) {
-        const int gi = boundary.A_indices[i];
-        if (gi < 0 || gi >= total_states) continue;
-        const double nA = (static_cast<int>(i) < flowA.size()) ? std::max(flowA(static_cast<int>(i)), 0.0) : 0.0;
-        if (boundary.explicit_recycling) {
-            out.population_for_rates(gi) = nA;
-        } else {
-            out.population_for_rates(gi) += nA;
-        }
-    }
-    for (size_t i = 0; i < boundary.M_indices.size(); ++i) {
-        const int gi = boundary.M_indices[i];
-        if (gi < 0 || gi >= total_states) continue;
-        const double nM = (static_cast<int>(i) < flowM.size()) ? std::max(flowM(static_cast<int>(i)), 0.0) : 0.0;
-        if (boundary.explicit_recycling) {
-            out.population_for_rates(gi) = nM;
-        } else {
-            out.population_for_rates(gi) += nM;
-        }
-    }
+    // Use background-only population for the main R assembly (match boundary behavior).
+    // Recycling-flow populations are not injected into out.R_full.
 
     // Update ne from quasi-neutrality at this spatial/iterative state.
     const auto& levels = atomic_data.get_levels();
+    const auto temperatures = evaluate_plasma_temperatures(config, x_cm);
     const double ne_local = quasineutral_electron_density(out.population_for_rates, levels);
-    dcr::state::PlasmaState plasma_local = plasma;
-    plasma_local.init_ne().setConstant(ne_local);
+    const LocalKineticContext plasma_local(
+        plasma,
+        grid,
+        temperatures.electron_eV,
+        temperatures.ion_eV,
+        ne_local
+    );
 
     out.R_full = dcr::base::Matrix::Zero(total_states, total_states);
     for (const auto& proc : atomic_data.get_processes()) {
         if (!proc) continue;
-        proc->apply(plasma_local, grid, out.population_for_rates, out.R_full, nullptr);
+        proc->apply(plasma_local.plasma(), plasma_local.grid(), out.population_for_rates, out.R_full, nullptr);
+    }
+
+    // For S evaluation, use local total population = background + recycling-flow states.
+    // This keeps source coupling responsive to local cell populations without changing the
+    // main background-only R block used in the linear background solve.
+    dcr::base::Vector population_for_source = out.population_for_rates;
+    for (size_t i = 0; i < boundary.A_indices.size(); ++i) {
+        const int gj = boundary.A_indices[i];
+        if (gj < 0 || gj >= total_states) continue;
+        const double nA = (static_cast<int>(i) < flowA.size())
+            ? std::max(flowA(static_cast<int>(i)), 0.0)
+            : 0.0;
+        if (boundary.explicit_recycling) {
+            population_for_source(gj) = nA;
+        } else {
+            population_for_source(gj) += nA;
+        }
+    }
+    for (size_t i = 0; i < boundary.M_indices.size(); ++i) {
+        const int gj = boundary.M_indices[i];
+        if (gj < 0 || gj >= total_states) continue;
+        const double nM = (static_cast<int>(i) < flowM.size())
+            ? std::max(flowM(static_cast<int>(i)), 0.0)
+            : 0.0;
+        if (boundary.explicit_recycling) {
+            population_for_source(gj) = nM;
+        } else {
+            population_for_source(gj) += nM;
+        }
+    }
+    dcr::base::Matrix R_for_S = dcr::base::Matrix::Zero(total_states, total_states);
+    {
+        const double ne_source = quasineutral_electron_density(population_for_source, levels);
+        const LocalKineticContext plasma_source(
+            plasma,
+            grid,
+            temperatures.electron_eV,
+            temperatures.ion_eV,
+            ne_source
+        );
+        for (const auto& proc : atomic_data.get_processes()) {
+            if (!proc) continue;
+            proc->apply(plasma_source.plasma(), plasma_source.grid(), population_for_source, R_for_S, nullptr);
+        }
     }
 
     // Build S on background rows with the same routing policy as boundary solve:
@@ -105,7 +138,7 @@ LocalSystem assemble_local_system(
                 const double nA = (static_cast<int>(j) < flowA.size())
                     ? std::max(flowA(static_cast<int>(j)), 0.0)
                     : 0.0;
-                Si += out.R_full(gi, gj) * nA;
+                Si += R_for_S(gi, gj) * nA;
             }
         }
         if (use_M_source) {
@@ -115,7 +148,7 @@ LocalSystem assemble_local_system(
                 const double nM = (static_cast<int>(j) < flowM.size())
                     ? std::max(flowM(static_cast<int>(j)), 0.0)
                     : 0.0;
-                Si += out.R_full(gi, gj) * nM;
+                Si += R_for_S(gi, gj) * nM;
             }
         }
         out.S_background(pi) = Si;

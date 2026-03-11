@@ -1,15 +1,31 @@
 #include "BoundaryPhase.hpp"
+
 #include "../../physics/Sheath.hpp"
+#include "../core/TemperatureProfile.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <vector>
 
 namespace dcr::solver {
 
 namespace {
+
+struct BgSubgroupSums {
+    double H_plus = 0.0;
+    double H = 0.0;
+    double H2 = 0.0;
+    double H2_plus = 0.0;
+    double H_minus = 0.0;
+};
+
+struct RecyclingModel {
+    std::vector<int> ion_p_cols;
+    std::vector<double> recA_coeff;
+    std::vector<double> recM_coeff;
+};
 
 double quasineutral_electron_density(const dcr::base::Vector& population,
                                      const std::vector<dcr::atomic::EnergyLevel>& levels) {
@@ -23,22 +39,54 @@ double quasineutral_electron_density(const dcr::base::Vector& population,
     return std::max(0.0, ne);
 }
 
-struct BgSubgroupSums {
-    double H_plus = 0.0;
-    double H = 0.0;
-    double H2 = 0.0;
-    double H2_plus = 0.0;
-    double H_minus = 0.0;
-};
+int find_ground_state(const std::vector<int>& indices,
+                      const std::vector<dcr::atomic::EnergyLevel>& levels) {
+    int best = -1;
+    double e_best = std::numeric_limits<double>::infinity();
+    for (int gi : indices) {
+        if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
+        if (levels[static_cast<size_t>(gi)].energy_eV < e_best) {
+            e_best = levels[static_cast<size_t>(gi)].energy_eV;
+            best = gi;
+        }
+    }
+    return best;
+}
 
-// Group the background states into compact hydrogen buckets for log readability.
-BgSubgroupSums summarize_boundary_background(const BoundaryPhaseResult& boundary,
-                                            const dcr::base::Vector& population,
-                                            const std::vector<dcr::atomic::EnergyLevel>& levels) {
+dcr::base::Matrix extract_R_pp(const dcr::base::Matrix& R_full,
+                               const std::vector<int>& p_indices) {
+    const int Pn = static_cast<int>(p_indices.size());
+    dcr::base::Matrix Rpp = dcr::base::Matrix::Zero(Pn, Pn);
+    for (int i = 0; i < Pn; ++i) {
+        const int gi = p_indices[static_cast<size_t>(i)];
+        if (gi < 0 || gi >= R_full.rows()) continue;
+        for (int j = 0; j < Pn; ++j) {
+            const int gj = p_indices[static_cast<size_t>(j)];
+            if (gj < 0 || gj >= R_full.cols()) continue;
+            Rpp(i, j) = R_full(gi, gj);
+        }
+    }
+    return Rpp;
+}
+
+dcr::base::Vector solve_linear(const dcr::base::Matrix& A,
+                               const dcr::base::Vector& b) {
+    if (A.rows() == A.cols()) {
+        Eigen::FullPivLU<dcr::base::Matrix> lu(A);
+        if (lu.rank() == A.rows()) {
+            return lu.solve(b);
+        }
+    }
+    return A.colPivHouseholderQr().solve(b);
+}
+
+BgSubgroupSums summarize_background(const BoundaryPhaseResult& boundary,
+                                    const dcr::base::Vector& population,
+                                    const std::vector<dcr::atomic::EnergyLevel>& levels) {
     BgSubgroupSums s;
     for (int gi : boundary.P_indices) {
         if (gi < 0 || gi >= static_cast<int>(levels.size()) || gi >= population.size()) continue;
-        const auto& lvl = levels[gi];
+        const auto& lvl = levels[static_cast<size_t>(gi)];
         const double n = std::max(population(gi), 0.0);
         if (lvl.type == dcr::atomic::SpeciesType::Ion && lvl.charge > 0) {
             if (lvl.atomicity >= 2) s.H2_plus += n;
@@ -69,116 +117,70 @@ double positive_sum_at_indices(const dcr::base::Vector& full,
     return s;
 }
 
-// Solve replaced square system using explicit inverse (requested),
-// with QR fallback if the matrix is rank-deficient.
-dcr::base::Vector solve_replaced_system(const dcr::base::Matrix& A,
-                                        const dcr::base::Vector& b) {
-    if (A.rows() == A.cols()) {
-        Eigen::FullPivLU<dcr::base::Matrix> lu(A);
-        if (lu.rank() == A.rows()) {
-            const dcr::base::Matrix A_inv = lu.inverse();
-            return A_inv * b;
-        }
+RecyclingModel build_recycling_model(
+    const BoundaryPhaseResult& boundary,
+    const std::vector<dcr::atomic::EnergyLevel>& levels,
+    const std::vector<int>& p_pos,
+    double c_A,
+    double c_M_atom,
+    double c_M_base) {
+
+    RecyclingModel model;
+    model.ion_p_cols.reserve(boundary.ion_indices.size());
+    model.recA_coeff.reserve(boundary.ion_indices.size());
+    model.recM_coeff.reserve(boundary.ion_indices.size());
+
+    for (int gi : boundary.ion_indices) {
+        if (gi < 0 || gi >= static_cast<int>(p_pos.size())) continue;
+        const int pi = p_pos[static_cast<size_t>(gi)];
+        if (pi < 0) continue;
+
+        const int mu_i = (gi >= 0 && gi < static_cast<int>(levels.size()))
+            ? std::max(1, levels[static_cast<size_t>(gi)].atomicity)
+            : 1;
+        const bool molecular_ion = mu_i > 1;
+
+        model.ion_p_cols.push_back(pi);
+        model.recA_coeff.push_back(molecular_ion ? 0.0 : c_A);
+        model.recM_coeff.push_back(molecular_ion ? (c_M_base * static_cast<double>(mu_i)) : c_M_atom);
     }
-    // Fallback for rank-deficient/rectangular systems.
-    return A.colPivHouseholderQr().solve(b);
+
+    return model;
 }
 
-struct NewtonPolishResult {
-    dcr::base::Vector x;
-    double residual_rel = std::numeric_limits<double>::infinity();
-    double constraint_rel = std::numeric_limits<double>::infinity();
-    bool improved = false;
-    int iterations = 0;
-};
-
-NewtonPolishResult polish_with_newton_soft_constraint(
-    const dcr::base::Matrix& M,
-    const dcr::base::Vector& rhs,
-    const dcr::base::Vector& constraint,
-    double target,
-    const dcr::base::Vector& x_seed,
-    double constraint_rel_max) {
-
-    NewtonPolishResult out;
-    out.x = x_seed;
-    if (M.rows() == 0 || M.cols() == 0 || rhs.size() == 0 || constraint.size() == 0) {
-        return out;
+void assign_flow_distribution(const BoundaryPhaseResult& boundary,
+                              double n_A_total,
+                              double n_M_total,
+                              dcr::base::Vector& nA_vec,
+                              dcr::base::Vector& nM_vec,
+                              dcr::base::Vector& population) {
+    if (boundary.explicit_recycling) {
+        for (int gi : boundary.R_indices) {
+            if (gi >= 0 && gi < population.size()) population(gi) = 0.0;
+        }
+        if (boundary.atom_ground >= 0 && boundary.atom_ground < population.size()) {
+            population(boundary.atom_ground) = std::max(0.0, n_A_total);
+        }
+        if (boundary.molecule_ground >= 0 && boundary.molecule_ground < population.size()) {
+            population(boundary.molecule_ground) = std::max(0.0, n_M_total);
+        }
+        return;
     }
 
-    auto evaluate = [&](const dcr::base::Vector& x_eval) {
-        const double r_norm = (M * x_eval - rhs).norm();
-        const double lhs_norm = (M * x_eval).norm();
-        const double r_rel = r_norm / std::max(1.0, lhs_norm);
-        const double c_rel = std::abs(constraint.dot(x_eval) - target) / std::max(1.0, std::abs(target));
-        return std::pair<double, double>{r_rel, c_rel};
-    };
-
-    const auto base_eval = evaluate(x_seed);
-    double best_resid_rel = base_eval.first;
-    double best_constraint_rel = base_eval.second;
-    out.residual_rel = best_resid_rel;
-    out.constraint_rel = best_constraint_rel;
-
-    const dcr::base::Matrix MtM = M.transpose() * M;
-    const double mtm_scale = std::max(1.0, MtM.diagonal().cwiseAbs().maxCoeff());
-    const dcr::base::Matrix ssT = constraint * constraint.transpose();
-    const double target_resid_rel = 1e-5;
-    int total_newton_iters = 0;
-
-    // Post-convergence Newton polish with progressively relaxed closure penalty.
-    const std::array<double, 10> lambda_factors = {1e8, 1e7, 1e6, 1e5, 1e4, 1e3, 1e2, 1e1, 1.0, 1e-1};
-    for (double fac : lambda_factors) {
-        if (best_resid_rel <= target_resid_rel && best_constraint_rel <= constraint_rel_max) break;
-        const double lambda = fac * mtm_scale;
-        const dcr::base::Matrix H = MtM + lambda * ssT;
-        dcr::base::Vector x_it = out.x;
-        for (int it = 0; it < 30; ++it) {
-            const dcr::base::Vector r = M * x_it - rhs;
-            const double c_err = constraint.dot(x_it) - target;
-            const dcr::base::Vector grad = M.transpose() * r + lambda * c_err * constraint;
-            dcr::base::Vector delta = solve_replaced_system(H, grad);
-            if (!delta.allFinite()) break;
-
-            const double obj0 = 0.5 * (r.squaredNorm() + lambda * c_err * c_err);
-            double alpha = 1.0;
-            bool accepted = false;
-            for (int ls = 0; ls < 20; ++ls) {
-                const dcr::base::Vector x_trial = x_it - alpha * delta;
-                if (!x_trial.allFinite()) {
-                    alpha *= 0.5;
-                    continue;
-                }
-                const dcr::base::Vector r_trial = M * x_trial - rhs;
-                const double c_trial = constraint.dot(x_trial) - target;
-                const double obj_trial = 0.5 * (r_trial.squaredNorm() + lambda * c_trial * c_trial);
-                if (obj_trial < obj0) {
-                    x_it = x_trial;
-                    accepted = true;
-                    break;
-                }
-                alpha *= 0.5;
-            }
-            if (!accepted) break;
-            ++total_newton_iters;
-            if (delta.norm() <= 1e-12 * (1.0 + x_it.norm())) break;
-        }
-
-        const auto eval = evaluate(x_it);
-        const double cand_resid_rel = eval.first;
-        const double cand_constraint_rel = eval.second;
-        if (cand_constraint_rel <= constraint_rel_max && cand_resid_rel < best_resid_rel) {
-            best_resid_rel = cand_resid_rel;
-            best_constraint_rel = cand_constraint_rel;
-            out.x = x_it;
-            out.residual_rel = cand_resid_rel;
-            out.constraint_rel = cand_constraint_rel;
-            out.improved = true;
-            out.iterations = total_newton_iters;
+    nA_vec.setZero();
+    nM_vec.setZero();
+    for (size_t j = 0; j < boundary.A_indices.size(); ++j) {
+        if (boundary.A_indices[j] == boundary.atom_ground) {
+            nA_vec(static_cast<int>(j)) = std::max(0.0, n_A_total);
+            break;
         }
     }
-
-    return out;
+    for (size_t j = 0; j < boundary.M_indices.size(); ++j) {
+        if (boundary.M_indices[j] == boundary.molecule_ground) {
+            nM_vec(static_cast<int>(j)) = std::max(0.0, n_M_total);
+            break;
+        }
+    }
 }
 
 } // namespace
@@ -192,416 +194,271 @@ BoundaryPhaseResult run_boundary_phase(
     const dcr::physics::WallRecycling& wall) {
 
     BoundaryPhaseResult out;
+    const auto boundary_temperatures = evaluate_plasma_temperatures(config, 0.0);
 
     const int total_states = atomic_data.get_total_states();
     const auto& levels = atomic_data.get_levels();
+    out.population = dcr::base::Vector::Zero(total_states);
 
+    // Speeds for recycling closure.
     const double u_bohm = dcr::physics::calculate_Bohm_speed(
-        config.plasma.Te_eV, config.plasma.Ti_eV, ion_mass_amu
-    );
+        boundary_temperatures.electron_eV, boundary_temperatures.ion_eV, ion_mass_amu);
     const double E_ref_atom = wall.gamma_E_atom * wall.ion_impact_energy_ev;
     out.u_A = dcr::physics::calculate_speed_from_energy_ev(E_ref_atom, ion_mass_amu);
 
-    // Keep a physical default for hydrogen molecules unless config explicitly provides one.
-    out.molecule_mass_amu = 2.0;
-    for (const auto& sp : config.species) {
-        if (sp.is_molecule && sp.charge == 0) {
-            // `mass_amu` defaults to 1.0 in YAML loader; do not let that override molecular default.
-            if (sp.mass_amu > 1.0) {
-                out.molecule_mass_amu = sp.mass_amu;
-            }
-            break;
-        }
-    }
-    out.u_M = dcr::physics::calculate_thermal_speed(
-        config.wall.temperature_eV, out.molecule_mass_amu
-    );
-
-    const auto& recycling_indices_cfg = atomic_data.get_recycling_indices();
-    out.explicit_recycling = !recycling_indices_cfg.empty();
-    if (config.io.verbose_logging) {
-        std::cout << "[DCR_Solver] recycling_indices from AtomicData: "
-                  << recycling_indices_cfg.size() << "\n";
-        if (!recycling_indices_cfg.empty()) {
-            std::cout << "[DCR_Solver] recycling indices:";
-            for (auto idx : recycling_indices_cfg) {
-                std::cout << " " << idx;
-            }
-            std::cout << "\n";
-        } else {
-            std::cout << "[DCR_Solver] recycling indices are empty -> implicit recycling mode.\n";
-        }
-    }
-
-    // Find ground states for recycled neutral atom and molecule.
-    out.atom_ground = -1;
-    out.molecule_ground = -1;
-    double min_atom_E = 1.0e99;
-    double min_mol_E = 1.0e99;
-    for (const auto& lvl : levels) {
-        if (lvl.charge != 0) continue;
-        if (out.explicit_recycling && !lvl.is_recycling) continue;
-        if (lvl.type == dcr::atomic::SpeciesType::Atom && lvl.energy_eV < min_atom_E) {
-            min_atom_E = lvl.energy_eV;
-            out.atom_ground = lvl.global_index;
-        } else if (lvl.type == dcr::atomic::SpeciesType::Molecule && lvl.energy_eV < min_mol_E) {
-            min_mol_E = lvl.energy_eV;
-            out.molecule_ground = lvl.global_index;
-        }
-    }
-
-    // Build index sets: recycling (R) includes all neutral recycled states.
-    out.is_recycling.assign(total_states, false);
-    for (auto idx : recycling_indices_cfg) {
-        if (idx >= 0 && idx < total_states) out.is_recycling[idx] = true;
-    }
-    out.R_indices.clear();
-    out.P_indices.clear();
-    out.R_indices.reserve(total_states);
-    out.P_indices.reserve(total_states);
-    for (int i = 0; i < total_states; ++i) {
-        if (out.is_recycling[i]) out.R_indices.push_back(i);
-        else out.P_indices.push_back(i);
-    }
-    if (config.io.verbose_logging) {
-        std::cout << "[DCR_Solver] Partition sizes: P=" << out.P_indices.size()
-                  << " R=" << out.R_indices.size() << "\n";
-    }
-
-    // Split recycling indices into atom/molecule groups for RA/RM blocks.
-    out.A_indices.clear();
-    out.M_indices.clear();
-    if (out.explicit_recycling) {
-        out.A_indices.reserve(out.R_indices.size());
-        out.M_indices.reserve(out.R_indices.size());
-        for (int idx : out.R_indices) {
-            if (idx < 0 || idx >= static_cast<int>(levels.size())) continue;
-            const auto& lvl = levels[idx];
-            if (lvl.type == dcr::atomic::SpeciesType::Atom && lvl.charge == 0) {
-                out.A_indices.push_back(idx);
-            } else if (lvl.type == dcr::atomic::SpeciesType::Molecule && lvl.charge == 0) {
-                out.M_indices.push_back(idx);
-            }
-        }
-    } else {
-        // Implicit recycling: reuse background neutral indices for R^A/R^M coefficients.
-        out.A_indices.reserve(out.P_indices.size());
-        out.M_indices.reserve(out.P_indices.size());
-        for (int idx : out.P_indices) {
-            if (idx < 0 || idx >= static_cast<int>(levels.size())) continue;
-            const auto& lvl = levels[idx];
-            if (lvl.type == dcr::atomic::SpeciesType::Atom && lvl.charge == 0) {
-                out.A_indices.push_back(idx);
-            } else if (lvl.type == dcr::atomic::SpeciesType::Molecule && lvl.charge == 0) {
-                out.M_indices.push_back(idx);
-            }
-        }
-    }
-    if (!out.explicit_recycling && config.io.verbose_logging) {
-        std::cout << "[DCR_Solver] Implicit recycling states: "
-                  << out.A_indices.size() << " atom, " << out.M_indices.size() << " molecule.\n";
-    }
-
-    // Background group indices (within P).
-    out.ion_indices.clear();
-    out.atom_bg_indices.clear();
-    out.mol_bg_indices.clear();
-    out.ion_indices.reserve(out.P_indices.size());
-    out.atom_bg_indices.reserve(out.P_indices.size());
-    out.mol_bg_indices.reserve(out.P_indices.size());
-    for (int idx : out.P_indices) {
-        if (idx < 0 || idx >= static_cast<int>(levels.size())) continue;
-        const auto& lvl = levels[idx];
-        // "I" block is positive ions only (exclude negative ions such as H-).
-        if (lvl.type == dcr::atomic::SpeciesType::Ion && lvl.charge > 0) {
-            out.ion_indices.push_back(idx);
-        } else if (lvl.type == dcr::atomic::SpeciesType::Atom && lvl.charge == 0) {
-            out.atom_bg_indices.push_back(idx);
-        } else if (lvl.type == dcr::atomic::SpeciesType::Molecule && lvl.charge == 0) {
-            out.mol_bg_indices.push_back(idx);
-        }
-    }
-
     out.atom_mass_amu = 1.0;
+    out.molecule_mass_amu = 2.0;
     for (const auto& sp : config.species) {
         if (!sp.is_molecule && sp.charge == 0) {
             out.atom_mass_amu = sp.mass_amu;
-            break;
+        }
+        // Config loader defaults mass_amu to 1.0 when unspecified.
+        // Keep physical H2 default (2.0) unless user explicitly sets a larger value.
+        if (sp.is_molecule && sp.charge == 0 && sp.mass_amu > 1.0) {
+            out.molecule_mass_amu = sp.mass_amu;
+        }
+    }
+    out.u_M = dcr::physics::calculate_thermal_speed(config.wall.temperature_eV, out.molecule_mass_amu);
+
+    // Partition states.
+    const auto& recycling_indices = atomic_data.get_recycling_indices();
+    out.explicit_recycling = !recycling_indices.empty();
+    out.is_recycling.assign(total_states, false);
+    for (int idx : recycling_indices) {
+        if (idx >= 0 && idx < total_states) out.is_recycling[static_cast<size_t>(idx)] = true;
+    }
+
+    out.P_indices.clear();
+    out.R_indices.clear();
+    for (int gi = 0; gi < total_states; ++gi) {
+        if (out.is_recycling[static_cast<size_t>(gi)]) out.R_indices.push_back(gi);
+        else out.P_indices.push_back(gi);
+    }
+
+    out.A_indices.clear();
+    out.M_indices.clear();
+    if (out.explicit_recycling) {
+        for (int gi : out.R_indices) {
+            if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
+            const auto& lvl = levels[static_cast<size_t>(gi)];
+            if (lvl.type == dcr::atomic::SpeciesType::Atom && lvl.charge == 0) out.A_indices.push_back(gi);
+            if (lvl.type == dcr::atomic::SpeciesType::Molecule && lvl.charge == 0) out.M_indices.push_back(gi);
+        }
+    } else {
+        for (int gi : out.P_indices) {
+            if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
+            const auto& lvl = levels[static_cast<size_t>(gi)];
+            if (lvl.type == dcr::atomic::SpeciesType::Atom && lvl.charge == 0) out.A_indices.push_back(gi);
+            if (lvl.type == dcr::atomic::SpeciesType::Molecule && lvl.charge == 0) out.M_indices.push_back(gi);
         }
     }
 
-    const double mu_M = 2.0;
-    const double n_nuclei0 = config.plasma.total_density;
-    const double c_A = (out.u_A > 0.0) ? (wall.alpha_atom * u_bohm / out.u_A) : 0.0;
-    const double c_M_atom = (out.u_M > 0.0) ? (wall.alpha_molecule * u_bohm / (mu_M * out.u_M)) : 0.0;
-    const double c_M_base = (out.u_M > 0.0) ? (u_bohm / (mu_M * out.u_M)) : 0.0;
-    const double c_s_A = dcr::physics::calculate_thermal_speed(
-        config.plasma.neutral_atom_temperature_eV, out.atom_mass_amu
-    );
-    const double c_s_M = dcr::physics::calculate_thermal_speed(
-        config.plasma.neutral_molecule_temperature_eV, out.molecule_mass_amu
-    );
-    const double w_local = std::max(config.grid.poloidal_width_cm, 1e-12);
-    const double exA_coef = c_s_A / w_local;
-    const double exM_coef = c_s_M / w_local;
-    const int max_iter = config.numerics.max_iterations;
-    const double tol = config.numerics.tolerance;
-    const double omega_raw = config.numerics.relaxation;
-    const double omega = (omega_raw > 0.0 && omega_raw <= 1.0) ? omega_raw : 1.0;
-    // --- Build population vector from initial conditions (background only) ---
-    out.population = dcr::base::Vector::Zero(total_states);
-    for (const auto& ic : config.plasma.initial_conditions) {
-        if (ic.species_index >= 0 && ic.species_index < total_states) {
-            if (!out.is_recycling[ic.species_index]) {
-                out.population(ic.species_index) = ic.fraction * config.plasma.total_density;
-            }
+    out.atom_ground = find_ground_state(out.A_indices, levels);
+    out.molecule_ground = find_ground_state(out.M_indices, levels);
+
+    out.ion_indices.clear();
+    out.atom_bg_indices.clear();
+    out.mol_bg_indices.clear();
+    for (int gi : out.P_indices) {
+        if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
+        const auto& lvl = levels[static_cast<size_t>(gi)];
+        if (lvl.type == dcr::atomic::SpeciesType::Ion && lvl.charge > 0) {
+            out.ion_indices.push_back(gi);
+        } else if (lvl.type == dcr::atomic::SpeciesType::Atom && lvl.charge == 0) {
+            out.atom_bg_indices.push_back(gi);
+        } else if (lvl.type == dcr::atomic::SpeciesType::Molecule && lvl.charge == 0) {
+            out.mol_bg_indices.push_back(gi);
         }
     }
 
     const int Pn = static_cast<int>(out.P_indices.size());
-    if (Pn > 0) {
-        dcr::base::Vector stoich = dcr::base::Vector::Zero(Pn);
-        dcr::base::Vector x = dcr::base::Vector::Zero(Pn);
-
-        // Recycling distributions (implicit mode uses separate vectors).
-        dcr::base::Vector nA_vec = dcr::base::Vector::Zero(static_cast<int>(out.A_indices.size()));
-        dcr::base::Vector nM_vec = dcr::base::Vector::Zero(static_cast<int>(out.M_indices.size()));
-        int atom_ground_pos = -1;
-        int molecule_ground_pos = -1;
-        if (!out.explicit_recycling) {
-            for (size_t i = 0; i < out.A_indices.size(); ++i) {
-                if (out.A_indices[i] == out.atom_ground) {
-                    atom_ground_pos = static_cast<int>(i);
-                    break;
-                }
-            }
-            for (size_t i = 0; i < out.M_indices.size(); ++i) {
-                if (out.M_indices[i] == out.molecule_ground) {
-                    molecule_ground_pos = static_cast<int>(i);
-                    break;
-                }
-            }
+    if (Pn == 0) {
+        if (config.io.verbose_logging) {
+            std::cout << "[DCR_Solver] Boundary skipped: no P states.\n";
         }
+        return out;
+    }
 
-        double bg_init_sum = 0.0;
+    // Initial background from config IC.
+    for (const auto& ic : config.plasma.initial_conditions) {
+        if (ic.species_index < 0 || ic.species_index >= total_states) continue;
+        if (out.explicit_recycling && out.is_recycling[static_cast<size_t>(ic.species_index)]) continue;
+        out.population(ic.species_index) = ic.fraction * config.plasma.total_density;
+    }
+
+    dcr::base::Vector nP = dcr::base::Vector::Zero(Pn);
+    dcr::base::Vector stoich = dcr::base::Vector::Zero(Pn);
+    std::vector<int> p_pos(static_cast<size_t>(total_states), -1);
+    for (int i = 0; i < Pn; ++i) {
+        const int gi = out.P_indices[static_cast<size_t>(i)];
+        p_pos[static_cast<size_t>(gi)] = i;
+        stoich(i) = (gi >= 0 && gi < static_cast<int>(levels.size()))
+            ? static_cast<double>(std::max(1, levels[static_cast<size_t>(gi)].atomicity))
+            : 1.0;
+        nP(i) = std::max(out.population(gi), 0.0);
+    }
+
+    const double n_nuclei0 = std::max(0.0, config.plasma.total_density);
+    const double init_weighted = stoich.dot(nP);
+    if (init_weighted > 0.0 && n_nuclei0 > 0.0) {
+        nP *= (n_nuclei0 / init_weighted);
+    } else if (n_nuclei0 > 0.0) {
+        const double stoich_sum = std::max(1.0, stoich.sum());
+        nP.setConstant(n_nuclei0 / stoich_sum);
+    }
+
+    const double mu_M = 2.0;
+    const double c_A = (out.u_A > 0.0) ? (wall.alpha_atom * u_bohm / out.u_A) : 0.0;
+    const double c_M_atom = (out.u_M > 0.0) ? (wall.alpha_molecule * u_bohm / (mu_M * out.u_M)) : 0.0;
+    const double c_M_base = (out.u_M > 0.0) ? (u_bohm / (mu_M * out.u_M)) : 0.0;
+    const RecyclingModel rec_model = build_recycling_model(out, levels, p_pos, c_A, c_M_atom, c_M_base);
+
+    const double c_s_A = dcr::physics::calculate_thermal_speed(
+        config.plasma.neutral_atom_temperature_eV, out.atom_mass_amu);
+    const double c_s_M = dcr::physics::calculate_thermal_speed(
+        config.plasma.neutral_molecule_temperature_eV, out.molecule_mass_amu);
+    const double w_local = std::max(config.grid.poloidal_width_cm, 1e-12);
+    const double exA_coef = c_s_A / w_local;
+    const double exM_coef = c_s_M / w_local;
+
+    const int max_iter = std::max(1, config.numerics.max_iterations);
+    const double tol = std::max(1e-14, config.numerics.tolerance);
+    const double omega_raw = config.numerics.relaxation;
+    double omega_iter = (omega_raw > 0.0 && omega_raw <= 1.0) ? omega_raw : 1.0;
+    const double omega_min = 0.05;
+    const double omega_max = 0.95;
+    double prev_metric = std::numeric_limits<double>::infinity();
+    double prev_rel_change = std::numeric_limits<double>::infinity();
+    double prev_residual_rel = std::numeric_limits<double>::infinity();
+    int rel_plateau_count = 0;
+    int stagnation_count = 0;
+    int rel_floor_count = 0;
+    int tiny_step_count = 0;
+    const int anderson_depth = 3;
+    const double anderson_reg = 1e-12;
+    const double anderson_step_limit = 5.0;
+    const double anderson_amp_limit = 10.0;
+    std::vector<dcr::base::Vector> anderson_cand_hist;
+    std::vector<dcr::base::Vector> anderson_res_hist;
+    int anderson_stall_count = 0;
+    bool anderson_started = false;
+
+    dcr::base::Vector nA_vec = dcr::base::Vector::Zero(static_cast<int>(out.A_indices.size()));
+    dcr::base::Vector nM_vec = dcr::base::Vector::Zero(static_cast<int>(out.M_indices.size()));
+
+    // Boundary uses only Eq. (1.345) fixed-point form; Eq. (1.346) is marching-only.
+    constexpr int constraint_row = 0;
+    bool converged = false;
+
+    for (int iter = 0; iter < max_iter; ++iter) {
+        // Write current background iterate into full population vector.
         for (int i = 0; i < Pn; ++i) {
-            const int gi = out.P_indices[i];
-            const int nu = (gi >= 0 && gi < static_cast<int>(levels.size())) ? levels[gi].atomicity : 1;
-            stoich(i) = static_cast<double>(nu);
-            bg_init_sum += std::max(out.population(gi), 0.0);
-        }
-        if (bg_init_sum > 0.0) {
-            // Keep the user-provided IC fractions as the baseline background fraction.
-            for (int i = 0; i < Pn; ++i) {
-                const int gi = out.P_indices[i];
-                x(i) = std::max(out.population(gi), 0.0) / bg_init_sum;
-            }
-        } else {
-            // Fallback: uniform fraction across background states.
-            x.setConstant(1.0 / static_cast<double>(Pn));
+            const int gi = out.P_indices[static_cast<size_t>(i)];
+            out.population(gi) = nP(i);
         }
 
-        // Precompute mapping from global index to P position.
-        std::vector<int> p_pos(total_states, -1);
-        for (int i = 0; i < Pn; ++i) {
-            p_pos[out.P_indices[i]] = i;
-        }
-        std::vector<int> ion_cols;
-        std::vector<double> recA_coeff;
-        std::vector<double> recM_coeff;
-        ion_cols.reserve(out.ion_indices.size());
-        recA_coeff.reserve(out.ion_indices.size());
-        recM_coeff.reserve(out.ion_indices.size());
+        // Grouped background totals.
+        double n_I_weighted = 0.0;
         for (int gi : out.ion_indices) {
-            const int pos = (gi >= 0 && gi < total_states) ? p_pos[gi] : -1;
-            if (pos < 0) continue;
-            const int mu_I = (gi >= 0 && gi < static_cast<int>(levels.size())) ? levels[gi].atomicity : 1;
-            const bool is_molecular_ion = (mu_I > 1);
-            ion_cols.push_back(pos);
-            // Molecular ions recycle to molecule channel; only atomic ions feed atomic channel.
-            recA_coeff.push_back(is_molecular_ion ? 0.0 : c_A);
-            // For atomic-ion -> molecular recycling, c_M_atom already includes the 1/mu_M factor.
-            // Do not apply an extra atomicity multiplier there.
-            recM_coeff.push_back(is_molecular_ion ? (c_M_base * mu_I) : c_M_atom);
+            if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
+            const int pi = p_pos[static_cast<size_t>(gi)];
+            if (pi < 0) continue;
+            const double mu_i = static_cast<double>(std::max(1, levels[static_cast<size_t>(gi)].atomicity));
+            n_I_weighted += mu_i * std::max(nP(pi), 0.0);
+        }
+        double n_a = 0.0;
+        for (int gi : out.atom_bg_indices) {
+            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size())) ? p_pos[static_cast<size_t>(gi)] : -1;
+            if (pi >= 0) n_a += std::max(nP(pi), 0.0);
+        }
+        double n_m = 0.0;
+        for (int gi : out.mol_bg_indices) {
+            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size())) ? p_pos[static_cast<size_t>(gi)] : -1;
+            if (pi >= 0) n_m += std::max(nP(pi), 0.0);
         }
 
-        dcr::base::Vector solve_constraint = stoich;
-        double solve_constraint_target = 1.0;
-        // Row replacement location.
-        int constraint_row = 1;
+        // Recycling flow closure from current ion populations (not Eq. 1.346).
+        double n_A_total = 0.0;
+        double n_M_total = 0.0;
+        for (size_t k = 0; k < rec_model.ion_p_cols.size(); ++k) {
+            const int pi = rec_model.ion_p_cols[k];
+            if (pi < 0 || pi >= nP.size()) continue;
+            const double n_i = std::max(nP(pi), 0.0);
+            n_A_total += rec_model.recA_coeff[k] * n_i;
+            n_M_total += rec_model.recM_coeff[k] * n_i;
+        }
+        n_A_total = std::max(0.0, n_A_total);
+        n_M_total = std::max(0.0, n_M_total);
 
-        dcr::base::Vector prev_x = x;
-        double omega_iter = omega;
-        double prev_rel_change = std::numeric_limits<double>::infinity();
-        int no_improve_count = 0;
-
-        for (int iter = 0; iter < max_iter; ++iter) {
-            // Build absolute densities from fractions.
-            for (int i = 0; i < Pn; ++i) {
-                out.population(out.P_indices[i]) = x(i) * n_nuclei0;
-            }
-
-            // Group totals from current population.
-            double n_I_weighted = 0.0;
-            for (int idx : out.ion_indices) {
-                if (idx < 0 || idx >= static_cast<int>(levels.size()) || idx >= out.population.size()) continue;
-                const double mu_i = std::max(1, levels[idx].atomicity);
-                const double n_i = std::max(out.population(idx), 0.0);
-                n_I_weighted += mu_i * n_i;
-            }
-            double n_a = 0.0;
-            for (int idx : out.atom_bg_indices) n_a += std::max(out.population(idx), 0.0);
-            double n_m = 0.0;
-            for (int idx : out.mol_bg_indices) n_m += std::max(out.population(idx), 0.0);
-            double n_A_total = 0.0;
-            double n_M_total = 0.0;
-            for (size_t k = 0; k < out.ion_indices.size() && k < recA_coeff.size(); ++k) {
-                const int gi = out.ion_indices[k];
-                const double n_i = std::max(out.population(gi), 0.0);
-                n_A_total += recA_coeff[k] * n_i;
-                n_M_total += recM_coeff[k] * n_i;
-            }
-
-            // Initial coupled guess scaling: normalize the combined
-            // (background + recycling-flow) nuclei budget to n_nuclei0.
-            if (iter == 0 && n_nuclei0 > 0.0) {
-                const double total_guess_nuclei =
-                    std::max(0.0, n_I_weighted) +
-                    std::max(0.0, n_a) +
-                    mu_M * std::max(0.0, n_m) +
-                    std::max(0.0, n_A_total) +
-                    mu_M * std::max(0.0, n_M_total);
-                if (total_guess_nuclei > 0.0) {
-                    const double scale0 = n_nuclei0 / total_guess_nuclei;
+        // Consistent per-iteration normalization:
+        // scale background and flow together so (bg + flow) nuclei stays at n_nuclei0.
+        if (n_nuclei0 > 0.0) {
+            const double total_guess_nuclei =
+                std::max(0.0, n_I_weighted) +
+                std::max(0.0, n_a) +
+                mu_M * std::max(0.0, n_m) +
+                std::max(0.0, n_A_total) +
+                mu_M * std::max(0.0, n_M_total);
+            if (total_guess_nuclei > 0.0) {
+                const double scale_state = n_nuclei0 / total_guess_nuclei;
+                if (std::isfinite(scale_state) && scale_state > 0.0 && std::abs(scale_state - 1.0) > 1e-14) {
+                    nP *= scale_state;
+                    n_I_weighted *= scale_state;
+                    n_a *= scale_state;
+                    n_m *= scale_state;
+                    n_A_total *= scale_state;
+                    n_M_total *= scale_state;
                     for (int i = 0; i < Pn; ++i) {
-                        out.population(out.P_indices[i]) *= scale0;
-                    }
-                    n_I_weighted *= scale0;
-                    n_a *= scale0;
-                    n_m *= scale0;
-                    n_A_total *= scale0;
-                    n_M_total *= scale0;
-                    // Keep iterate state consistent with the rescaled initial background.
-                    for (int i = 0; i < Pn; ++i) {
-                        x(i) = out.population(out.P_indices[i]) / n_nuclei0;
-                    }
-                    prev_x = x;
-                }
-
-                // Extra guard for iter-0: do not let recycling flow exceed
-                // the remaining nuclei budget after the background.
-                const double bg_nuclei_iter0 =
-                    std::max(0.0, n_I_weighted) +
-                    std::max(0.0, n_a) +
-                    mu_M * std::max(0.0, n_m);
-                const double flow_nuclei_iter0 =
-                    std::max(0.0, n_A_total) +
-                    mu_M * std::max(0.0, n_M_total);
-                const double flow_budget_iter0 = std::max(0.0, n_nuclei0 - bg_nuclei_iter0);
-                if (flow_nuclei_iter0 > flow_budget_iter0 && flow_nuclei_iter0 > 0.0) {
-                    const double flow_scale0 = flow_budget_iter0 / flow_nuclei_iter0;
-                    n_A_total *= flow_scale0;
-                    n_M_total *= flow_scale0;
-                }
-            }
-
-            double n_A_iter = n_A_total;
-            double n_M_iter = n_M_total;
-
-            // Final iter-0 consistency pass: the exact bg+flow state used to build R
-            // is normalized to the target nuclei density.
-            if (iter == 0 && n_nuclei0 > 0.0) {
-                const double total0 =
-                    std::max(0.0, n_I_weighted) +
-                    std::max(0.0, n_a) +
-                    mu_M * std::max(0.0, n_m) +
-                    std::max(0.0, n_A_iter) +
-                    mu_M * std::max(0.0, n_M_iter);
-                if (total0 > 0.0) {
-                    const double s0 = n_nuclei0 / total0;
-                    if (std::abs(s0 - 1.0) > 1e-14) {
-                        for (int i = 0; i < Pn; ++i) {
-                            out.population(out.P_indices[i]) *= s0;
-                        }
-                        n_I_weighted *= s0;
-                        n_a *= s0;
-                        n_m *= s0;
-                        n_A_iter *= s0;
-                        n_M_iter *= s0;
-                        n_A_total = n_A_iter;
-                        n_M_total = n_M_iter;
-                        for (int i = 0; i < Pn; ++i) {
-                            x(i) = out.population(out.P_indices[i]) / n_nuclei0;
-                        }
-                        prev_x = x;
+                        const int gi = out.P_indices[static_cast<size_t>(i)];
+                        out.population(gi) = nP(i);
                     }
                 }
             }
+        }
 
-            if (out.explicit_recycling) {
-                // Reset recycling populations to ground states.
-                for (int idx : out.R_indices) {
-                    out.population(idx) = 0.0;
-                }
-                if (out.atom_ground >= 0 && out.atom_ground < out.population.size()) {
-                    out.population(out.atom_ground) = n_A_iter;
-                }
-                if (out.molecule_ground >= 0 && out.molecule_ground < out.population.size()) {
-                    out.population(out.molecule_ground) = n_M_iter;
-                }
-            } else {
-                // Implicit recycling: store flow densities in separate vectors.
-                nA_vec.setZero();
-                nM_vec.setZero();
-                if (atom_ground_pos >= 0) {
-                    nA_vec(atom_ground_pos) = n_A_iter;
-                }
-                if (molecule_ground_pos >= 0) {
-                    nM_vec(molecule_ground_pos) = n_M_iter;
-                }
-            }
+        assign_flow_distribution(out, n_A_total, n_M_total, nA_vec, nM_vec, out.population);
 
-            // Local plasma density constraint:
-            // n_local = n_total - n_recycling_flow (nuclei units), normalized by n_total.
-            double solve_constraint_target_iter = solve_constraint_target;
-            if (n_nuclei0 > 0.0) {
-                const double flow_nuclei = std::max(0.0, n_A_iter + mu_M * n_M_iter);
-                solve_constraint_target_iter = std::clamp((n_nuclei0 - flow_nuclei) / n_nuclei0, 0.0, 1.0);
+        // Build population used for process rates with background-only density.
+        // Recycling-flow populations are excluded from R-assembly by request.
+        dcr::base::Vector population_for_R = dcr::base::Vector::Zero(total_states);
+        for (int i = 0; i < Pn; ++i) {
+            const int gi = out.P_indices[static_cast<size_t>(i)];
+            if (gi >= 0 && gi < total_states) {
+                population_for_R(gi) = std::max(nP(i), 0.0);
             }
+        }
 
-            // Assemble rate matrix using total population (background + recycling flow).
-            dcr::base::Vector population_for_R = out.population;
-            if (!out.explicit_recycling) {
-                if (out.atom_ground >= 0 && out.atom_ground < population_for_R.size()) {
-                    population_for_R(out.atom_ground) += n_A_iter;
-                }
-                if (out.molecule_ground >= 0 && out.molecule_ground < population_for_R.size()) {
-                    population_for_R(out.molecule_ground) += n_M_iter;
-                }
-            }
-            dcr::base::Matrix R = dcr::base::Matrix::Zero(total_states, total_states);
-            const double ne_local = quasineutral_electron_density(population_for_R, levels);
-            plasma.init_ne().setConstant(ne_local);
-            for (const auto& proc : atomic_data.get_processes()) {
-                if (!proc) continue;
-                proc->apply(plasma, grid, population_for_R, R, nullptr);
-            }
+        // Assemble full CR matrix R(population).
+        dcr::base::Matrix R_full = dcr::base::Matrix::Zero(total_states, total_states);
+        const double ne_local = quasineutral_electron_density(population_for_R, levels);
+        const LocalKineticContext plasma_local(
+            plasma,
+            grid,
+            boundary_temperatures.electron_eV,
+            boundary_temperatures.ion_eV,
+            ne_local
+        );
+        for (const auto& proc : atomic_data.get_processes()) {
+            if (!proc) continue;
+            proc->apply(plasma_local.plasma(), plasma_local.grid(), population_for_R, R_full, nullptr);
+        }
 
-            // Build local CR matrix on background block R_PP.
-            dcr::base::Matrix Rpp = dcr::base::Matrix::Zero(Pn, Pn);
-            for (int i = 0; i < Pn; ++i) {
-                const int gi = out.P_indices[i];
-                for (int j = 0; j < Pn; ++j) {
-                    const int gj = out.P_indices[j];
-                    Rpp(i, j) = R(gi, gj);
-                }
-            }
+        const dcr::base::Matrix Rpp = extract_R_pp(R_full, out.P_indices);
 
-            // Build recycling source S on background rows (explicit source form).
-            dcr::base::Vector S_bg = dcr::base::Vector::Zero(Pn);
-            for (int i = 0; i < Pn; ++i) {
-                const int gi = out.P_indices[i];
-                const auto& row_lvl = levels[gi];
+        // Test mode requested: comment out all LHS(A) and S terms for boundary.
+        // This makes the boundary linear solve:
+        //   R_PP n^{k+1} = 0, with one row replaced by the nuclei closure.
+        const bool disable_boundary_lhs_and_s = false;
+
+        dcr::base::Vector S_bg = dcr::base::Vector::Zero(Pn);
+        dcr::base::Matrix A = dcr::base::Matrix::Zero(Pn, Pn);
+        if (!disable_boundary_lhs_and_s) {
+            // Recycling source S on background rows.
+            for (int pi = 0; pi < Pn; ++pi) {
+                const int gi = out.P_indices[static_cast<size_t>(pi)];
+                if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
+
+                const auto& row_lvl = levels[static_cast<size_t>(gi)];
                 bool use_A_source = false;
                 bool use_M_source = false;
                 if (row_lvl.type == dcr::atomic::SpeciesType::Ion && row_lvl.charge > 0) {
@@ -619,295 +476,518 @@ BoundaryPhaseResult run_boundary_phase(
                 if (use_A_source) {
                     for (size_t j = 0; j < out.A_indices.size(); ++j) {
                         const int gj = out.A_indices[j];
+                        if (gj < 0 || gj >= total_states) continue;
                         const double nA = out.explicit_recycling
                             ? std::max(out.population(gj), 0.0)
-                            : ((j < static_cast<size_t>(nA_vec.size()))
-                                   ? std::max(nA_vec(static_cast<int>(j)), 0.0)
-                                   : 0.0);
-                        Si += R(gi, gj) * nA;
+                            : ((static_cast<int>(j) < nA_vec.size()) ? std::max(nA_vec(static_cast<int>(j)), 0.0) : 0.0);
+                        Si += R_full(gi, gj) * nA;
                     }
                 }
                 if (use_M_source) {
                     for (size_t j = 0; j < out.M_indices.size(); ++j) {
                         const int gj = out.M_indices[j];
+                        if (gj < 0 || gj >= total_states) continue;
                         const double nM = out.explicit_recycling
                             ? std::max(out.population(gj), 0.0)
-                            : ((j < static_cast<size_t>(nM_vec.size()))
-                                   ? std::max(nM_vec(static_cast<int>(j)), 0.0)
-                                   : 0.0);
-                        Si += R(gi, gj) * nM;
+                            : ((static_cast<int>(j) < nM_vec.size()) ? std::max(nM_vec(static_cast<int>(j)), 0.0) : 0.0);
+                        Si += R_full(gi, gj) * nM;
                     }
                 }
-                S_bg(i) = Si;
+                S_bg(pi) = Si;
             }
 
-            // Use the same S used on the RHS to derive the grouped recycling source in L_I.
-            // This keeps the scalar source term and the vector source term algebraically aligned.
+            // Eq. (1.345) grouped transport coefficients.
+            // Keep only local exhaust terms (a,m). Do not include recycling-flow exhaust (A,M).
             const double source_nuclei_from_S = stoich.dot(S_bg);
-            const double Gamma_ex_a_over_w = exA_coef * std::max(0.0, n_A_iter);
-            const double Gamma_ex_m_over_w = exM_coef * std::max(0.0, n_M_iter);
-
-            // Restore local exhaust terms in Eq. (1.345) grouped transport:
-            //   L_I = source - (Gamma_ex_a + mu_M * Gamma_ex_m)/w
-            //   L_a = Gamma_ex_a/w, L_m = Gamma_ex_m/w
+            const double Gamma_ex_a_over_w = exA_coef * std::max(0.0, n_a);
+            const double Gamma_ex_m_over_w = exM_coef * std::max(0.0, n_m);
             const double L_I = source_nuclei_from_S - (Gamma_ex_a_over_w + mu_M * Gamma_ex_m_over_w);
             const double L_a = Gamma_ex_a_over_w;
             const double L_m = Gamma_ex_m_over_w;
 
-            // Build transport matrix A (grouped LHS operator on x).
-            dcr::base::Matrix A = dcr::base::Matrix::Zero(Pn, Pn);
-
             if (n_I_weighted > 0.0) {
                 for (int gi : out.ion_indices) {
-                    const int pi = p_pos[gi];
-                    if (pi >= 0 && gi >= 0 && gi < static_cast<int>(levels.size())) {
-                        // Ion-state share uses n_i / (sum_j mu_j n_j).
-                        A(pi, pi) = L_I / n_I_weighted;
-                    }
+                    if (gi < 0 || gi >= static_cast<int>(p_pos.size())) continue;
+                    const int pi = p_pos[static_cast<size_t>(gi)];
+                    if (pi >= 0) A(pi, pi) = L_I / n_I_weighted;
                 }
             }
             if (n_a > 0.0) {
                 const double coeff = L_a / n_a;
                 for (int gi : out.atom_bg_indices) {
-                    const int pi = p_pos[gi];
+                    if (gi < 0 || gi >= static_cast<int>(p_pos.size())) continue;
+                    const int pi = p_pos[static_cast<size_t>(gi)];
                     if (pi >= 0) A(pi, pi) = coeff;
                 }
             }
             if (n_m > 0.0) {
                 const double coeff = L_m / n_m;
                 for (int gi : out.mol_bg_indices) {
-                    const int pi = p_pos[gi];
+                    if (gi < 0 || gi >= static_cast<int>(p_pos.size())) continue;
+                    const int pi = p_pos[static_cast<size_t>(gi)];
                     if (pi >= 0) A(pi, pi) = coeff;
                 }
             }
+        }
 
-            const double n_scale = std::max(1.0, n_nuclei0);
-            const dcr::base::Vector S_bg_scaled = S_bg / n_scale;
+        // Boundary fixed-point linear solve in R n = T - S form:
+        //   R_PP n^{k+1} = A(n^k) n^k - S(n^k),
+        // with A and S frozen from the current iterate.
+        const dcr::base::Vector rhs_frozen = A * nP - S_bg;
+        dcr::base::Matrix C = Rpp;
+        dcr::base::Vector rhs = rhs_frozen;
 
-            // Frozen fixed-point boundary solve with row replacement:
-            //   R_PP x^{k+1} = (T - S), with T frozen from current iterate x.
-            const dcr::base::Matrix M = Rpp;
-            const dcr::base::Vector rhs = A * x - S_bg_scaled;
-            dcr::base::Vector x_new = x;
-            double ls_constraint_err = std::numeric_limits<double>::quiet_NaN();
-            const double ls_tol = 1e-8;
-            dcr::base::Matrix C = M;
-            dcr::base::Vector rhs_replaced = rhs;
-            C.row(constraint_row) = solve_constraint.transpose();
-            rhs_replaced(constraint_row) = solve_constraint_target_iter;
-            x_new = solve_replaced_system(C, rhs_replaced);
-            ls_constraint_err = std::abs(solve_constraint.dot(x_new) - solve_constraint_target_iter);
-            const double constrained_sum = solve_constraint.dot(x_new);
-            if (constrained_sum > 0.0) {
-                x_new *= (solve_constraint_target_iter / constrained_sum);
-            } else {
-                if (solve_constraint_target_iter <= 0.0) {
-                    x_new.setZero();
-                } else {
-                    x_new = x;
-                }
-            }
+        const double flow_nuclei = std::max(0.0, n_A_total) + mu_M * std::max(0.0, n_M_total);
+        const double target_bg_nuclei = std::max(0.0, n_nuclei0 - flow_nuclei);
 
-            // Under-relaxation to avoid limit cycles.
-            if (omega_iter < 1.0) {
-                x_new = (1.0 - omega_iter) * x + omega_iter * x_new;
-            }
+        C.row(constraint_row) = stoich.transpose();
+        rhs(constraint_row) = target_bg_nuclei;
 
-            const double diff = (x_new - prev_x).cwiseAbs().maxCoeff();
-            const double scale = std::max(1.0, x_new.cwiseAbs().maxCoeff());
-            const double rel_change = diff / scale;
-
-            const dcr::base::Vector residual_vec = Rpp * x_new - (A * x_new - S_bg_scaled);
-            const double residual = residual_vec.norm();
-            const double lhs_norm = (Rpp * x_new).norm();
-            const double residual_rel = residual / std::max(1.0, lhs_norm);
-            const dcr::base::Vector ax_minus_s = A * x_new - S_bg_scaled;
-            const double ax_minus_s_sum = ax_minus_s.sum();
-            const double ax_minus_s_abs_sum = ax_minus_s.cwiseAbs().sum();
-            const double ax_minus_s_weighted_sum = stoich.dot(ax_minus_s);
-            const double ax_minus_s_weighted_abs_sum =
-                (stoich.array() * ax_minus_s.cwiseAbs().array()).sum();
-            if (rel_change >= prev_rel_change * 0.999) {
-                ++no_improve_count;
-            } else {
-                no_improve_count = 0;
-            }
-
-            if (no_improve_count >= 5 && omega_iter > 0.1) {
-                omega_iter = std::max(0.1, 0.5 * omega_iter);
-                no_improve_count = 0;
-                if (config.io.verbose_logging) {
-                    std::cout << "[DCR_Solver] Boundary: slow convergence, reducing relaxation to "
-                              << omega_iter << "\n";
-                }
-            }
-            // Periodic damping if we're stuck above tolerance.
-            if (((iter + 1) % 50 == 0) && rel_change > (10.0 * tol) && omega_iter > 0.1) {
-                omega_iter = std::max(0.1, 0.5 * omega_iter);
-                if (config.io.verbose_logging) {
-                    std::cout << "[DCR_Solver] Boundary: periodic damping, reducing relaxation to "
-                              << omega_iter << "\n";
-                }
-            }
-
-            prev_x = x_new;
-            x = x_new;
-            prev_rel_change = rel_change;
-
+        dcr::base::Vector nP_candidate = solve_linear(C, rhs);
+        if (!nP_candidate.allFinite()) {
             if (config.io.verbose_logging) {
-                const double constrained_check = solve_constraint.dot(x_new);
-                BgSubgroupSums bg_iter;
-                for (int pi = 0; pi < Pn; ++pi) {
-                    const int gi = out.P_indices[pi];
-                    if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
-                    const auto& lvl = levels[gi];
-                    const double n = std::max(x_new(pi) * n_nuclei0, 0.0);
-                    if (lvl.type == dcr::atomic::SpeciesType::Ion && lvl.charge > 0) {
-                        if (lvl.atomicity >= 2) bg_iter.H2_plus += n;
-                        else bg_iter.H_plus += n;
-                    } else if (lvl.type == dcr::atomic::SpeciesType::Ion && lvl.charge < 0) {
-                        bg_iter.H_minus += n;
-                    } else if (lvl.type == dcr::atomic::SpeciesType::Atom && lvl.charge == 0) {
-                        bg_iter.H += n;
-                    } else if (lvl.type == dcr::atomic::SpeciesType::Molecule && lvl.charge == 0) {
-                        bg_iter.H2 += n;
+                std::cout << "[DCR_Solver] Boundary linear solve produced non-finite values at iter "
+                          << (iter + 1) << ".\n";
+            }
+            break;
+        }
+
+        // Anderson mixing on boundary fixed-point map (state = nP only).
+        // Use the undamped map nP_candidate; damping is handled in the line-search loop.
+        const dcr::base::Vector xk = nP;
+        const dcr::base::Vector x_candidate = nP_candidate;
+        const dcr::base::Vector r_candidate = x_candidate - xk;
+        const dcr::base::Vector nP_plain_target = nP_candidate;
+        dcr::base::Vector nP_target = nP_plain_target;
+        bool used_anderson = false;
+        bool anderson_step_available = false;
+        if (anderson_depth > 0 && nP.size() > 0) {
+            const int hist_take =
+                std::min(anderson_depth, static_cast<int>(anderson_cand_hist.size()));
+            const int pool_size = hist_take + 1;
+            if (pool_size >= 2) {
+                anderson_started = true;
+            }
+            if (pool_size >= 2) {
+                const int m = pool_size - 1;
+                std::vector<dcr::base::Vector> cand_pool;
+                std::vector<dcr::base::Vector> res_pool;
+                cand_pool.reserve(static_cast<size_t>(pool_size));
+                res_pool.reserve(static_cast<size_t>(pool_size));
+                const int start = static_cast<int>(anderson_cand_hist.size()) - hist_take;
+                for (int h = start; h < static_cast<int>(anderson_cand_hist.size()); ++h) {
+                    cand_pool.push_back(anderson_cand_hist[static_cast<size_t>(h)]);
+                    res_pool.push_back(anderson_res_hist[static_cast<size_t>(h)]);
+                }
+                cand_pool.push_back(x_candidate);
+                res_pool.push_back(r_candidate);
+
+                const dcr::base::Vector& r_ref = res_pool.back();
+                dcr::base::Matrix B = dcr::base::Matrix::Zero(nP.size(), m);
+                dcr::base::Matrix dC = dcr::base::Matrix::Zero(nP.size(), m);
+                for (int j = 0; j < m; ++j) {
+                    B.col(j) = res_pool[static_cast<size_t>(j)] - r_ref;
+                    dC.col(j) = cand_pool[static_cast<size_t>(j)] - cand_pool.back();
+                }
+                dcr::base::Matrix BtB = B.transpose() * B;
+                BtB.diagonal().array() += anderson_reg;
+                const dcr::base::Vector beta = BtB.ldlt().solve(B.transpose() * (-r_ref));
+                if (beta.allFinite()) {
+                    const dcr::base::Vector x_mix = cand_pool.back() + dC * beta;
+                    if (x_mix.allFinite()) {
+                        const double scale_xk = std::max(1.0, xk.cwiseAbs().maxCoeff());
+                        const double rel_cand = (x_candidate - xk).cwiseAbs().maxCoeff() / scale_xk;
+                        const double rel_mix = (x_mix - xk).cwiseAbs().maxCoeff() / scale_xk;
+                        const double max_cand = x_candidate.cwiseAbs().maxCoeff();
+                        const double max_mix = x_mix.cwiseAbs().maxCoeff();
+                        const bool stable_mix =
+                            rel_mix <= anderson_step_limit * std::max(rel_cand, 1e-14) &&
+                            max_mix <= anderson_amp_limit * std::max(1.0, max_cand);
+                        if (stable_mix) {
+                            nP_target = x_mix;
+                            anderson_step_available = true;
+                        } else {
+                            anderson_cand_hist.clear();
+                            anderson_res_hist.clear();
+                        }
                     }
                 }
-                std::cout << "[DCR_Solver] Boundary iter " << (iter + 1)
-                          << " rel_change=" << rel_change
-                          << " ls_constraint_err=" << ls_constraint_err
-                          << " constrained_val=" << constrained_check
-                          << " sum(Ax-S)=" << ax_minus_s_sum
-                          << " sumabs(Ax-S)=" << ax_minus_s_abs_sum
-                          << " wsum(Ax-S)=" << ax_minus_s_weighted_sum
-                          << " wsumabs(Ax-S)=" << ax_minus_s_weighted_abs_sum
-                          << " residual_rel(diag)=" << residual_rel
-                          << " bg{H+=" << bg_iter.H_plus
-                          << ", H=" << bg_iter.H
-                          << ", H2=" << bg_iter.H2
-                          << ", H2+=" << bg_iter.H2_plus
-                          << ", H-=" << bg_iter.H_minus
-                          << "}\n";
+            }
+            // User-requested behavior: once Anderson is turned on, never turn it off.
+            // If no stable mixed step is available, fall back to x_candidate but keep
+            // Anderson mode active.
+            if (anderson_started) {
+                if (!nP_target.allFinite()) {
+                    nP_target = nP_plain_target;
+                    anderson_step_available = false;
+                }
+                used_anderson = true;
+            }
+            anderson_cand_hist.push_back(x_candidate);
+            anderson_res_hist.push_back(r_candidate);
+            if (static_cast<int>(anderson_cand_hist.size()) > anderson_depth) {
+                anderson_cand_hist.erase(anderson_cand_hist.begin());
+                anderson_res_hist.erase(anderson_res_hist.begin());
+            }
+        }
+        dcr::base::Vector nP_new = nP;
+        dcr::base::Vector ax_minus_s = dcr::base::Vector::Zero(Pn);
+        double rel_change = std::numeric_limits<double>::infinity();
+        double residual_rel = std::numeric_limits<double>::infinity();
+        double constraint_err = std::numeric_limits<double>::infinity();
+        double omega_used = std::clamp(omega_iter, omega_min, omega_max);
+        double accepted_metric = std::numeric_limits<double>::infinity();
+        bool had_negative_any = false;
+        int accepted_ls = -1;
+        bool anderson_step_used = false;
+        bool anderson_fallback_used = false;
+
+        // Adaptive damping: try larger step when smooth, back off on stalls/oscillation.
+        int ls = 0;
+        bool try_anderson_step = used_anderson && anderson_step_available;
+        while (ls < 8) {
+            const dcr::base::Vector& step_target =
+                (try_anderson_step ? nP_target : nP_plain_target);
+            dcr::base::Vector nP_trial = nP + omega_used * (step_target - nP);
+
+            // Positivity floor on trial update:
+            // if any component crosses below zero, replace that trial component
+            // by half of the previous iterate value.
+            bool had_negative_component = false;
+            for (int i = 0; i < nP_trial.size(); ++i) {
+                if (nP_trial(i) < 0.0) {
+                    nP_trial(i) = 0.5 * std::max(nP(i), 0.0);
+                    had_negative_component = true;
+                }
+            }
+            had_negative_any = had_negative_any || had_negative_component;
+
+            // Enforce the nuclei closure exactly after relaxation.
+            if (target_bg_nuclei <= 0.0) {
+                nP_trial.setZero();
+            } else {
+                const double constrained_now = stoich.dot(nP_trial);
+                if (constrained_now > 0.0) {
+                    nP_trial *= (target_bg_nuclei / constrained_now);
+                }
             }
 
-            if (rel_change < tol &&
-                std::isfinite(ls_constraint_err) && ls_constraint_err < ls_tol) {
-                // Post-convergence Newton polish on frozen linearized system.
-                const double polish_constraint_rel_max = 1e-5;
-                const auto polish = polish_with_newton_soft_constraint(
-                    M, rhs, solve_constraint, solve_constraint_target_iter, x_new, polish_constraint_rel_max);
-                if (polish.improved) {
-                    x_new = polish.x;
-                    x = x_new;
-                    prev_x = x_new;
-                    if (config.io.verbose_logging) {
-                        std::cout << "[DCR_Solver] Boundary Newton polish applied: resid_rel="
-                                  << polish.residual_rel
-                                  << " constraint_rel=" << polish.constraint_rel
-                                  << " iters=" << polish.iterations
-                                  << "\n";
-                    }
-                }
-                if (config.io.verbose_logging) {
-                    std::cout << "[DCR_Solver] Boundary converged in " << (iter + 1) << " iterations.\n";
-                }
+            const double diff_trial = (nP_trial - nP).cwiseAbs().maxCoeff();
+            const double scale_trial = std::max(1.0, nP.cwiseAbs().maxCoeff());
+            const double rel_change_trial = diff_trial / scale_trial;
+
+            const dcr::base::Vector ax_minus_s_trial = rhs_frozen;
+            const dcr::base::Vector lhs_trial = Rpp * nP_trial;
+            const dcr::base::Vector residual_trial = lhs_trial - rhs_frozen;
+            const double residual_rel_trial = residual_trial.norm() / std::max(1.0, lhs_trial.norm());
+            const double constraint_err_trial = std::abs(stoich.dot(nP_trial) - target_bg_nuclei);
+            const double metric_trial = std::max(rel_change_trial, residual_rel_trial);
+
+            const bool accept_trial =
+                !std::isfinite(prev_metric) ||
+                metric_trial <= prev_metric * 1.02 ||
+                omega_used <= omega_min * 1.001 ||
+                ls == 7;
+
+            if (accept_trial) {
+                nP_new = nP_trial;
+                ax_minus_s = ax_minus_s_trial;
+                rel_change = rel_change_trial;
+                residual_rel = residual_rel_trial;
+                constraint_err = constraint_err_trial;
+                accepted_metric = metric_trial;
+                accepted_ls = ls;
+                anderson_step_used = try_anderson_step;
                 break;
             }
-            if (iter == max_iter - 1 && config.io.verbose_logging) {
-                std::cout << "[DCR_Solver] Boundary reached max iterations without convergence.\n";
+
+            // Monotone safeguard: if mixed Anderson step is rejected, fall back
+            // to the plain fixed-point step for this iteration.
+            if (try_anderson_step) {
+                try_anderson_step = false;
+                anderson_fallback_used = true;
+                omega_used = std::clamp(omega_iter, omega_min, omega_max);
+                ls = 0;
+                continue;
+            }
+
+            if (had_negative_component) {
+                omega_used = std::max(omega_min, 0.5 * omega_used);
+            } else {
+                omega_used = std::max(omega_min, 0.5 * omega_used);
+            }
+            ++ls;
+        }
+
+        if (anderson_fallback_used) {
+            anderson_cand_hist.clear();
+            anderson_res_hist.clear();
+            anderson_stall_count = 0;
+            if (config.io.verbose_logging) {
+                std::cout << "[DCR_Solver] Boundary: rejected Anderson mixed step; "
+                          << "using plain fixed-point step this iteration.\n";
             }
         }
 
-        // Update population and flow totals using the converged x.
-        for (int i = 0; i < Pn; ++i) {
-            out.population(out.P_indices[i]) = x(i) * n_nuclei0;
-        }
-
-        double n_A_total_final = 0.0;
-        double n_M_total_final = 0.0;
-        for (size_t k = 0; k < ion_cols.size(); ++k) {
-            const int pos = ion_cols[k];
-            if (pos >= 0 && pos < x.size()) {
-                const double n_i = x(pos) * n_nuclei0;
-                n_A_total_final += recA_coeff[k] * n_i;
-                n_M_total_final += recM_coeff[k] * n_i;
-            }
-        }
-
-        // Final physical projection: enforce nonnegative background populations and
-        // renormalize background nuclei so bg + flow exactly matches n_nuclei0.
-        n_A_total_final = std::max(0.0, n_A_total_final);
-        n_M_total_final = std::max(0.0, n_M_total_final);
-        const double flow_total_pos_final = n_A_total_final + mu_M * n_M_total_final;
-        const double target_bg_total_final = std::max(0.0, n_nuclei0 - flow_total_pos_final);
-
-        double bg_total_pos_final = 0.0;
-        for (int i = 0; i < Pn; ++i) {
-            const int gi = out.P_indices[i];
-            if (gi < 0 || gi >= out.population.size() || gi >= static_cast<int>(levels.size())) continue;
-            out.population(gi) = std::max(out.population(gi), 0.0);
-            bg_total_pos_final += static_cast<double>(levels[gi].atomicity) * out.population(gi);
-        }
-        if (target_bg_total_final > 0.0) {
-            if (bg_total_pos_final > 0.0) {
-                const double scale_bg = target_bg_total_final / bg_total_pos_final;
-                for (int i = 0; i < Pn; ++i) {
-                    const int gi = out.P_indices[i];
-                    if (gi >= 0 && gi < out.population.size()) out.population(gi) *= scale_bg;
-                }
-            } else if (Pn > 0) {
-                const int gi0 = out.P_indices[0];
-                const double nu0 = (gi0 >= 0 && gi0 < static_cast<int>(levels.size()))
-                    ? std::max(1, levels[gi0].atomicity) : 1;
-                if (gi0 >= 0 && gi0 < out.population.size()) {
-                    out.population(gi0) = target_bg_total_final / static_cast<double>(nu0);
-                }
+        if (std::isfinite(prev_metric)) {
+            if (accepted_metric < 0.7 * prev_metric) {
+                omega_iter = std::min(omega_max, omega_used * 1.2);
+            } else if (accepted_metric > 1.05 * prev_metric) {
+                omega_iter = std::max(omega_min, omega_used * 0.7);
+            } else {
+                omega_iter = std::clamp(omega_used, omega_min, omega_max);
             }
         } else {
-            for (int i = 0; i < Pn; ++i) {
-                const int gi = out.P_indices[i];
-                if (gi >= 0 && gi < out.population.size()) out.population(gi) = 0.0;
+            omega_iter = std::min(omega_max, omega_used * 1.1);
+        }
+        // If step became too small and trial was clean, grow it back adaptively.
+        // This avoids getting stuck at tiny damping after temporary negativity.
+        if (!had_negative_any && accepted_ls == 0 &&
+            rel_change < std::max(1e-6, 10.0 * tol)) {
+            omega_iter = std::min(omega_max, std::max(omega_iter, 1.25 * omega_used));
+        }
+        if (!had_negative_any && omega_iter <= (1.05 * omega_min) &&
+            rel_change < std::max(1e-6, 50.0 * tol)) {
+            omega_iter = std::min(omega_max, 1.5 * omega_iter);
+        }
+        prev_metric = accepted_metric;
+
+        // If rel_change plateaus, nudge omega upward to escape very slow damping.
+        if (std::isfinite(prev_rel_change)) {
+            const double rel_band = 0.02 * std::max(1e-16, prev_rel_change);
+            if (std::abs(rel_change - prev_rel_change) <= rel_band) {
+                ++rel_plateau_count;
+            } else {
+                rel_plateau_count = 0;
             }
         }
-
-        if (out.explicit_recycling) {
-            for (int idx : out.R_indices) {
-                out.population(idx) = 0.0;
+        if (rel_plateau_count >= 6) {
+            // Plateau at high damping often indicates a near-2-cycle/floor:
+            // back off omega to re-damp instead of pushing higher.
+            if (omega_iter > 0.2) {
+                omega_iter = std::max(omega_min, omega_iter * 0.6);
+            } else {
+                omega_iter = std::min(omega_max, omega_iter * 1.15);
             }
-            if (out.atom_ground >= 0 && out.atom_ground < out.population.size()) {
-                out.population(out.atom_ground) = n_A_total_final;
+            rel_plateau_count = 0;
+        }
+        const bool rel_stalled =
+            std::isfinite(prev_rel_change) &&
+            std::abs(rel_change - prev_rel_change) <= 0.01 * std::max(1e-16, prev_rel_change);
+        const bool resid_stalled =
+            std::isfinite(prev_residual_rel) &&
+            std::abs(residual_rel - prev_residual_rel) <= 0.01 * std::max(1e-16, prev_residual_rel);
+        if (rel_stalled && resid_stalled) {
+            ++stagnation_count;
+        } else {
+            stagnation_count = 0;
+        }
+        if (anderson_step_used && rel_stalled && resid_stalled) {
+            ++anderson_stall_count;
+        } else if (!used_anderson) {
+            anderson_stall_count = 0;
+        } else {
+            anderson_stall_count = std::max(0, anderson_stall_count - 1);
+        }
+        if (anderson_stall_count >= 12) {
+            anderson_cand_hist.clear();
+            anderson_res_hist.clear();
+            anderson_stall_count = 0;
+            omega_iter = std::max(omega_min, 0.5 * omega_iter);
+            if (config.io.verbose_logging) {
+                std::cout << "[DCR_Solver] Boundary: Anderson cycling detected; "
+                          << "resetting Anderson history and reducing relaxation to "
+                          << omega_iter << ".\n";
             }
-            if (out.molecule_ground >= 0 && out.molecule_ground < out.population.size()) {
-                out.population(out.molecule_ground) = n_M_total_final;
+        }
+        // Additional plateau stop: if rel_change sits near a floor for many iterations,
+        // stop and emit the final boundary summary.
+        if (std::isfinite(prev_rel_change)) {
+            const double rel_ref = std::max(1e-16, std::max(rel_change, prev_rel_change));
+            const double rel_delta = std::abs(rel_change - prev_rel_change);
+            const bool near_floor = rel_change <= std::max(20.0 * tol, 1e-10);
+            const bool almost_constant = rel_delta <= 0.005 * rel_ref; // <=0.5% drift
+            if (near_floor && almost_constant) {
+                ++rel_floor_count;
+            } else {
+                rel_floor_count = 0;
             }
         } else {
-            out.flowA_last = dcr::base::Vector::Zero(static_cast<int>(out.A_indices.size()));
-            out.flowM_last = dcr::base::Vector::Zero(static_cast<int>(out.M_indices.size()));
-            for (size_t i = 0; i < out.A_indices.size(); ++i) {
-                if (out.A_indices[i] == out.atom_ground) {
-                    out.flowA_last(static_cast<int>(i)) = n_A_total_final;
-                    break;
+            rel_floor_count = 0;
+        }
+        prev_rel_change = rel_change;
+        prev_residual_rel = residual_rel;
+
+        if (config.io.verbose_logging) {
+            const double bg_nuclei_iter = stoich.dot(nP_new);
+            const double flow_nuclei_iter =
+                std::max(0.0, n_A_total) + mu_M * std::max(0.0, n_M_total);
+            const double nuclei_total_iter = bg_nuclei_iter + flow_nuclei_iter;
+            const double cons_rel_err =
+                std::abs(nuclei_total_iter - n_nuclei0) / std::max(1.0, n_nuclei0);
+            const double ls_constraint_rel =
+                constraint_err / std::max(1.0, n_nuclei0);
+            BgSubgroupSums bg_iter;
+            for (int pi = 0; pi < Pn; ++pi) {
+                const int gi = out.P_indices[static_cast<size_t>(pi)];
+                if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
+                const auto& lvl = levels[static_cast<size_t>(gi)];
+                const double n = std::max(nP_new(pi), 0.0);
+                if (lvl.type == dcr::atomic::SpeciesType::Ion && lvl.charge > 0) {
+                    if (lvl.atomicity >= 2) bg_iter.H2_plus += n;
+                    else bg_iter.H_plus += n;
+                } else if (lvl.type == dcr::atomic::SpeciesType::Ion && lvl.charge < 0) {
+                    bg_iter.H_minus += n;
+                } else if (lvl.type == dcr::atomic::SpeciesType::Atom && lvl.charge == 0) {
+                    bg_iter.H += n;
+                } else if (lvl.type == dcr::atomic::SpeciesType::Molecule && lvl.charge == 0) {
+                    bg_iter.H2 += n;
                 }
             }
-            for (size_t i = 0; i < out.M_indices.size(); ++i) {
-                if (out.M_indices[i] == out.molecule_ground) {
-                    out.flowM_last(static_cast<int>(i)) = n_M_total_final;
-                    break;
-                }
+
+            std::cout << "[DCR_Solver] Boundary iter " << (iter + 1)
+                      << " T{e=" << boundary_temperatures.electron_eV
+                      << ", i=" << boundary_temperatures.ion_eV
+                      << "}"
+                      << " rel_change=" << rel_change
+                      << " omega=" << omega_used
+                      << " omega_next=" << omega_iter
+                      << " anderson=" << (used_anderson ? "on" : "off")
+                      << " anderson_step=" << (anderson_step_used ? "mix" : "plain")
+                      << " ls_constraint_err=" << constraint_err
+                      << " ls_constraint_rel=" << ls_constraint_rel
+                      << " constrained_val=" << (target_bg_nuclei > 0.0 ? stoich.dot(nP_new) / target_bg_nuclei : 0.0)
+                      << " wsum(Ax-S)=" << stoich.dot(ax_minus_s)
+                      << " wsumabs(Ax-S)=" << (stoich.array() * ax_minus_s.cwiseAbs().array()).sum()
+                      << " residual_rel(diag)=" << residual_rel
+                      << " cons_rel_err=" << cons_rel_err
+                      << " bg{H+=" << bg_iter.H_plus
+                      << ", H=" << bg_iter.H
+                      << ", H2=" << bg_iter.H2
+                      << ", H2+=" << bg_iter.H2_plus
+                      << ", H-=" << bg_iter.H_minus
+                      << "} flow{A=" << n_A_total
+                      << ", M=" << n_M_total
+                      << "} nuclei{bg=" << bg_nuclei_iter
+                      << ", flow=" << flow_nuclei_iter
+                      << ", total=" << nuclei_total_iter
+                      << ", target=" << n_nuclei0
+                      << "}\n";
+        }
+
+        nP = nP_new;
+        if (rel_change < tol) {
+            converged = true;
+            if (config.io.verbose_logging) {
+                std::cout << "[DCR_Solver] Boundary converged in " << (iter + 1) << " iterations.\n";
             }
-            out.have_flow_last = true;
+            break;
+        }
+        if (stagnation_count >= 40) {
+            converged = true;
+            if (config.io.verbose_logging) {
+                std::cout << "[DCR_Solver] Boundary stagnated near residual floor; stopping at iter "
+                          << (iter + 1)
+                          << " (rel_change=" << rel_change
+                          << ", residual_rel=" << residual_rel << ").\n";
+            }
+            break;
+        }
+        if (rel_floor_count >= 80) {
+            converged = true;
+            if (config.io.verbose_logging) {
+                std::cout << "[DCR_Solver] Boundary rel_change plateau; stopping at iter "
+                          << (iter + 1)
+                          << " (rel_change=" << rel_change
+                          << ", residual_rel=" << residual_rel << ").\n";
+            }
+            break;
+        }
+        const double tiny_step_tol = std::max(2e-7, 20.0 * tol);
+        const double tiny_resid_tol = std::max(1e-4, 1000.0 * tol);
+        if (rel_change <= tiny_step_tol && residual_rel <= tiny_resid_tol) {
+            ++tiny_step_count;
+        } else {
+            tiny_step_count = 0;
+        }
+        if (tiny_step_count >= 40) {
+            converged = true;
+            if (config.io.verbose_logging) {
+                std::cout << "[DCR_Solver] Boundary tiny-step floor reached; stopping at iter "
+                          << (iter + 1)
+                          << " (rel_change=" << rel_change
+                          << ", residual_rel=" << residual_rel << ").\n";
+            }
+            break;
+        }
+
+        if (iter == max_iter - 1 && config.io.verbose_logging) {
+            std::cout << "[DCR_Solver] Boundary reached max iterations without convergence.\n";
         }
     }
 
+    (void)converged;
+
+    // Final output projection.
+    for (int gi : out.R_indices) {
+        if (gi >= 0 && gi < out.population.size()) out.population(gi) = 0.0;
+    }
+    for (int i = 0; i < Pn; ++i) {
+        const int gi = out.P_indices[static_cast<size_t>(i)];
+        out.population(gi) = std::max(0.0, nP(i));
+    }
+
+    double n_A_total_final = 0.0;
+    double n_M_total_final = 0.0;
+    for (size_t k = 0; k < rec_model.ion_p_cols.size(); ++k) {
+        const int pi = rec_model.ion_p_cols[k];
+        if (pi < 0 || pi >= nP.size()) continue;
+        const double n_i = std::max(nP(pi), 0.0);
+        n_A_total_final += rec_model.recA_coeff[k] * n_i;
+        n_M_total_final += rec_model.recM_coeff[k] * n_i;
+    }
+    n_A_total_final = std::max(0.0, n_A_total_final);
+    n_M_total_final = std::max(0.0, n_M_total_final);
+
+    if (out.explicit_recycling) {
+        if (out.atom_ground >= 0 && out.atom_ground < out.population.size()) {
+            out.population(out.atom_ground) = n_A_total_final;
+        }
+        if (out.molecule_ground >= 0 && out.molecule_ground < out.population.size()) {
+            out.population(out.molecule_ground) = n_M_total_final;
+        }
+        out.have_flow_last = false;
+    } else {
+        out.flowA_last = dcr::base::Vector::Zero(static_cast<int>(out.A_indices.size()));
+        out.flowM_last = dcr::base::Vector::Zero(static_cast<int>(out.M_indices.size()));
+        for (size_t i = 0; i < out.A_indices.size(); ++i) {
+            if (out.A_indices[i] == out.atom_ground) {
+                out.flowA_last(static_cast<int>(i)) = n_A_total_final;
+                break;
+            }
+        }
+        for (size_t i = 0; i < out.M_indices.size(); ++i) {
+            if (out.M_indices[i] == out.molecule_ground) {
+                out.flowM_last(static_cast<int>(i)) = n_M_total_final;
+                break;
+            }
+        }
+        out.have_flow_last = true;
+    }
+
     if (config.io.verbose_logging) {
-        const auto bg = summarize_boundary_background(out, out.population, levels);
+        const auto bg = summarize_background(out, out.population, levels);
         const double flowA_total = out.explicit_recycling
             ? positive_sum_at_indices(out.population, out.A_indices)
             : positive_sum(out.flowA_last);
         const double flowM_total = out.explicit_recycling
             ? positive_sum_at_indices(out.population, out.M_indices)
             : positive_sum(out.flowM_last);
+
         std::cout << "[DCR_Solver] Boundary x=0 cm"
+                  << " T{e=" << boundary_temperatures.electron_eV
+                  << ", i=" << boundary_temperatures.ion_eV
+                  << "}"
                   << " bg{H+=" << bg.H_plus
                   << ", H=" << bg.H
                   << ", H2=" << bg.H2
@@ -916,41 +996,6 @@ BoundaryPhaseResult run_boundary_phase(
                   << "} flow{A=" << flowA_total
                   << ", M=" << flowM_total
                   << "}\n";
-
-        double bg_total = 0.0;
-        for (int idx : out.P_indices) {
-            if (idx >= 0 && idx < static_cast<int>(levels.size())) {
-                bg_total += levels[idx].atomicity * out.population(idx);
-            }
-        }
-
-        double flow_total = 0.0;
-        if (out.explicit_recycling) {
-            for (int idx : out.R_indices) {
-                if (idx >= 0 && idx < static_cast<int>(levels.size())) {
-                    flow_total += levels[idx].atomicity * out.population(idx);
-                }
-            }
-        } else if (out.have_flow_last) {
-            for (size_t i = 0; i < out.A_indices.size(); ++i) {
-                const int gi = out.A_indices[i];
-                if (gi >= 0 && gi < static_cast<int>(levels.size())) {
-                    flow_total += levels[gi].atomicity * out.flowA_last(static_cast<int>(i));
-                }
-            }
-            for (size_t i = 0; i < out.M_indices.size(); ++i) {
-                const int gi = out.M_indices[i];
-                if (gi >= 0 && gi < static_cast<int>(levels.size())) {
-                    flow_total += levels[gi].atomicity * out.flowM_last(static_cast<int>(i));
-                }
-            }
-        }
-
-        std::cout << "[DCR_Solver] Boundary nuclei totals: background=" << bg_total
-                  << " flow=" << flow_total
-                  << " total=" << (bg_total + flow_total)
-                  << " target_total=" << n_nuclei0 << "\n";
-        std::cout << "[DCR_Solver] Boundary init: u_A=" << out.u_A << " u_M=" << out.u_M << "\n";
     }
 
     return out;

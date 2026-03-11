@@ -1,11 +1,8 @@
 io:
-  # Effective atomic rates and QSS diagnostics are written to dcr_results.h5
-  # under /rates for every run.
-  output_dir: output/test_run/5eV
+  output_dir: output/test_run_Tx_profile_quick
   atomic_data_root: atomic_data/
   data_tables_root: data_tables/
-  # Keep this enabled if you want SCD/ACD and QSS summaries in the terminal log.
-  verbose_logging: true
+  verbose_logging: false
 species:
 - name: H_Atom
   filename: sclit.01
@@ -14,15 +11,29 @@ species:
   filename: sclit_M.01
   is_molecule: true
 grid:
-  length_cm: 1
-  num_cells: 100
-  type: log
-  first_cell_cm: 0.001
+  length_cm: 2.0
+  num_cells: 4
+  type: linear
+  first_cell_cm: 0.0
   poloidal_width_cm: 100.0
 plasma:
   total_density_cm3: 1e15
   Te_eV: 5.0
   Ti_eV: 5.0
+  electron_temperature_profile:
+    enabled: true
+    type: linear_x
+    x_start_cm: 0.0
+    x_end_cm: 2.0
+    value_start_eV: 1.0
+    value_end_eV: 5.0
+  ion_temperature_profile:
+    enabled: true
+    type: linear_x
+    x_start_cm: 0.0
+    x_end_cm: 2.0
+    value_start_eV: 1.0
+    value_end_eV: 5.0
   neutral_atom_temperature_eV: 0.1
   neutral_molecule_temperature_eV: 0.1
   initial_conditions:
@@ -37,8 +48,8 @@ wall:
   sheath_potential_drop: 4.0
   temperature_eV: 0.1
 numerics:
-  tolerance: 1.0e-7
-  max_iterations: 500
+  tolerance: 1.0e-6
+  max_iterations: 300
   relaxation: 0.2
-  marching_slow_iter_threshold: 1000
+  marching_slow_iter_threshold: 100
   marching_guess_retries: 3

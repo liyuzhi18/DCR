@@ -12,6 +12,7 @@ namespace dcr::solver {
 // - /grid/{x_cm,n_nuclei_cm3}
 // - /states/{labels,type_id,charge,atomicity,internal_id,P_indices,A_indices,M_indices}
 // - /population/{background_full,flowA,flowM,total_full}
+// - /rates/{Te_eV,Ti_eV,ne_cm3,atomic_scd_cm3_s,atomic_acd_cm3_s,...}
 // All population datasets are stored in cm^-3.
 void write_hdf5_output(
     const dcr::io::Config& config,

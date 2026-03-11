@@ -5,6 +5,7 @@
 #include "../../physics/EEDF.hpp"
 #include "../../state/PlasmaState.hpp"
 #include "../boundary/BoundaryPhase.hpp"
+#include "../core/RateAnalysis.hpp"
 #include <vector>
 
 namespace dcr::solver {
@@ -21,6 +22,8 @@ struct MarchingHistory {
     // - flowM: [num_cells, |M_indices|]
     std::vector<dcr::base::Vector> flowA;
     std::vector<dcr::base::Vector> flowM;
+    // Local effective atomic rates and QSS transport diagnostics at each node.
+    std::vector<RateDiagnosticSnapshot> rate_diagnostics;
 };
 
 // Full spatial integration from boundary to domain end.

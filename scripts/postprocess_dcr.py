@@ -7,10 +7,13 @@ This script generates journal-style figures for:
    background {H+, H-, H, H2, H2+} and flow totals {A(H), M(H2)}.
 2) Detailed flow-state evolution vs x:
    per-state curves for A and M flow blocks.
+3) Detailed local-state composition vs x:
+   per-state curves for local atomic H and local molecular H2 background blocks.
 
 Examples:
   python scripts/postprocess_dcr.py groups --input output/dcr_results.h5
   python scripts/postprocess_dcr.py flow-detail --input output/dcr_results.h5
+  python scripts/postprocess_dcr.py background-detail --input output/dcr_results.h5
   python scripts/postprocess_dcr.py all --input output/dcr_results.h5
 """
 
@@ -275,16 +278,16 @@ def grouped_curves_fraction(data: DCRData) -> Dict[str, np.ndarray]:
     return out
 
 
-def flow_state_display_label(data: DCRData, gi: int, label: str, flow_kind: str) -> str:
+def state_display_label(data: DCRData, gi: int, label: str, block_kind: str) -> str:
     """
-    Render compact scientific legend labels for flow states.
-    A-flow: H(n=...)
-    M-flow: H2(v=...)
+    Render compact scientific legend labels for atomic and molecular state blocks.
+    A: H(n=...)
+    M: H2(v=...)
     """
     token = label.split()[-1] if label.split() else label
     t = token.lower()
 
-    if flow_kind == "A":
+    if block_kind == "A":
         if data.internal_id is not None and 0 <= gi < data.internal_id.size:
             return rf"$\mathrm{{H}}(n={int(data.internal_id[gi])})$"
         m = re.search(r"h_(\d+)$", t)
@@ -350,6 +353,7 @@ def save_group_plot(data: DCRData, args: argparse.Namespace, outdir: Path) -> Pa
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Fractional Population")
+    ax.set_title("Local Background Plasma Density")
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.grid(True, which="major", linestyle="--", linewidth=0.5, alpha=0.35)
@@ -373,6 +377,7 @@ def save_flow_detail_plot(
     args: argparse.Namespace,
     out_path: Path,
     title: str,
+    ylabel: str,
 ) -> Optional[Path]:
     if matrix.size == 0 or matrix.shape[1] == 0:
         return None
@@ -395,11 +400,11 @@ def save_flow_detail_plot(
             x_plot,
             y_plot,
             color=cmap(j % 20),
-            label=flow_state_display_label(data, gi, l_sel[j], flow_kind),
+            label=state_display_label(data, gi, l_sel[j], flow_kind),
         )
 
     ax.set_xlabel(xlabel)
-    ax.set_ylabel("Fractional Population")
+    ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -431,14 +436,42 @@ def prepare_flow_matrix_and_labels_fraction(
             labels.append(f"state_{int(gi)}")
         state_indices.append(int(gi))
 
+    # For flow-detail plots, show the internal composition of each flow block.
+    # Normalize each row by that block's own total density so the plotted state
+    # fractions sum to 1 at each x.
     mat = np.maximum(mat, 0.0).copy()
-    for j, gi in enumerate(idx):
-        if j >= mat.shape[1]:
-            break
-        mat[:, j] *= state_atomicity(data, int(gi))
+    denom = np.sum(mat, axis=1)
+    denom = np.where(denom > 0.0, denom, np.nan)
+    mat = mat / denom[:, None]
+    return mat, labels, state_indices
 
-    total = total_nuclei_profile(data)
-    denom = np.where(total > 0.0, total, np.nan)
+
+def prepare_background_matrix_and_labels_fraction(
+    data: DCRData, block_kind: str
+) -> Tuple[np.ndarray, List[str], List[int]]:
+    if block_kind not in {"A", "M"}:
+        raise ValueError(f"Unsupported background block kind: {block_kind}")
+
+    wanted_group = "H" if block_kind == "A" else "H2"
+    state_indices: List[int] = []
+    labels: List[str] = []
+
+    for gi in data.p_indices:
+        gi_int = int(gi)
+        if classify_state(data, gi_int) != wanted_group:
+            continue
+        state_indices.append(gi_int)
+        if 0 <= gi_int < len(data.labels):
+            labels.append(data.labels[gi_int])
+        else:
+            labels.append(f"state_{gi_int}")
+
+    if not state_indices:
+        return np.zeros((data.background_full.shape[0], 0)), labels, state_indices
+
+    mat = np.maximum(data.background_full[:, state_indices], 0.0).copy()
+    denom = np.sum(mat, axis=1)
+    denom = np.where(denom > 0.0, denom, np.nan)
     mat = mat / denom[:, None]
     return mat, labels, state_indices
 
@@ -463,7 +496,8 @@ def run_flow_detail(data: DCRData, args: argparse.Namespace, outdir: Path) -> Li
         flow_kind="A",
         args=args,
         out_path=outdir / "flow_A_states_vs_x.pdf",
-        title="Flow A(H) State Evolution",
+        title="Flow A(H) State Composition",
+        ylabel="Normalized Flow Population",
     )
     if out_a is not None:
         written.append(out_a)
@@ -479,7 +513,49 @@ def run_flow_detail(data: DCRData, args: argparse.Namespace, outdir: Path) -> Li
         flow_kind="M",
         args=args,
         out_path=outdir / "flow_M_states_vs_x.pdf",
-        title="Flow M(H2) State Evolution",
+        title="Flow M(H2) State Composition",
+        ylabel="Normalized Flow Population",
+    )
+    if out_m is not None:
+        written.append(out_m)
+
+    return written
+
+
+def run_background_detail(data: DCRData, args: argparse.Namespace, outdir: Path) -> List[Path]:
+    x, xlabel = convert_x(data.x_cm, args.x_unit)
+    written: List[Path] = []
+
+    mat_a, labels_a, idx_a = prepare_background_matrix_and_labels_fraction(data, "A")
+    out_a = save_flow_detail_plot(
+        data=data,
+        x=x,
+        xlabel=xlabel,
+        matrix=mat_a,
+        labels=labels_a,
+        state_indices=idx_a,
+        flow_kind="A",
+        args=args,
+        out_path=outdir / "bg_atomic_states_vs_x.pdf",
+        title="Local Atomic H State Composition",
+        ylabel="Normalized Local Population",
+    )
+    if out_a is not None:
+        written.append(out_a)
+
+    mat_m, labels_m, idx_m = prepare_background_matrix_and_labels_fraction(data, "M")
+    out_m = save_flow_detail_plot(
+        data=data,
+        x=x,
+        xlabel=xlabel,
+        matrix=mat_m,
+        labels=labels_m,
+        state_indices=idx_m,
+        flow_kind="M",
+        args=args,
+        out_path=outdir / "bg_molecular_states_vs_x.pdf",
+        title="Local Molecular H2 State Composition",
+        ylabel="Normalized Local Population",
     )
     if out_m is not None:
         written.append(out_m)
@@ -502,7 +578,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
         p.add_argument("--x-unit", choices=["cm", "m"], default="cm")
         p.add_argument("--dpi", type=int, default=300, help="Figure DPI")
-        p.add_argument("--font-scale", type=float, default=1.0, help="Global font scaling factor")
+        p.add_argument("--font-scale", type=float, default=1.4, help="Global font scaling factor")
 
     sub = parser.add_subparsers(dest="command", required=True)
     p_groups = sub.add_parser("groups", help="Plot grouped background and flow totals vs x")
@@ -511,7 +587,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_flow = sub.add_parser("flow-detail", help="Plot detailed flow-state evolution vs x")
     add_common_options(p_flow)
 
-    p_all = sub.add_parser("all", help="Generate both grouped and detailed flow plots")
+    p_bg = sub.add_parser("background-detail", help="Plot detailed local atomic and molecular state composition vs x")
+    add_common_options(p_bg)
+
+    p_all = sub.add_parser("all", help="Generate grouped, flow-detail, and local background-detail plots")
     add_common_options(p_all)
 
     return parser
@@ -535,9 +614,12 @@ def main() -> int:
         written.extend(run_groups(data, args, outdir))
     elif args.command == "flow-detail":
         written.extend(run_flow_detail(data, args, outdir))
+    elif args.command == "background-detail":
+        written.extend(run_background_detail(data, args, outdir))
     elif args.command == "all":
         written.extend(run_groups(data, args, outdir))
         written.extend(run_flow_detail(data, args, outdir))
+        written.extend(run_background_detail(data, args, outdir))
 
     if not written:
         print("[postprocess] No plots were generated (empty flow blocks?).")

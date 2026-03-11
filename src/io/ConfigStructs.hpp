@@ -5,6 +5,16 @@
 
 namespace dcr::io {
 
+    struct TemperatureProfileConfig {
+        bool enabled = false;
+        std::string type = "constant"; // "constant" or "linear_x"
+        base::Real value_eV = 0.0;
+        base::Real x_start_cm = 0.0;
+        base::Real x_end_cm = 0.0;
+        base::Real value_start_eV = 0.0;
+        base::Real value_end_eV = 0.0;
+    };
+
    struct IOConfig {
         std::string output_dir = "output";
         std::string atomic_data_root = "";
@@ -39,6 +49,8 @@ namespace dcr::io {
         base::Real total_density = 0.0; // cm^-3
         base::Real Te_eV = 0.0;
         base::Real Ti_eV = 0.0;
+        TemperatureProfileConfig electron_temperature_profile;
+        TemperatureProfileConfig ion_temperature_profile;
         base::Real neutral_atom_temperature_eV = 0.1;
         base::Real neutral_molecule_temperature_eV = 0.1;
         std::vector<InitialCondition> initial_conditions;

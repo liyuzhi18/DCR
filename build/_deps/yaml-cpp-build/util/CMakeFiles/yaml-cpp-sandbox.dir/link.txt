@@ -1,1 +1,0 @@
-/usr/bin/c++  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names "CMakeFiles/yaml-cpp-sandbox.dir/sandbox.cpp.o" -o ../../../bin/sandbox  ../libyaml-cpp.a

@@ -2,6 +2,7 @@
 
 #include "boundary/BoundaryPhase.hpp"
 #include "core/ConfigPaths.hpp"
+#include "core/TemperatureProfile.hpp"
 #include "marching/MarchingDriver.hpp"
 #include "output/HDF5Output.hpp"
 
@@ -55,15 +56,20 @@ void DCR_Solver::solve() {
             break;
         }
     }
+    const auto boundary_temperatures = evaluate_plasma_temperatures(config, 0.0);
+    plasma.init_Te().setConstant(boundary_temperatures.electron_eV);
+    plasma.init_Ti().setConstant(boundary_temperatures.ion_eV);
     const auto wall = dcr::physics::compute_wall_recycling(
         config.wall.material,
-        config.plasma.Te_eV,
-        config.plasma.Ti_eV,
+        boundary_temperatures.electron_eV,
+        boundary_temperatures.ion_eV,
         ion_mass_amu,
         config.wall.sheath_potential_drop
     );
     if (config.io.verbose_logging) {
-        std::cout << "[DCR_Solver] Wall recycling: E0=" << wall.ion_impact_energy_ev
+        std::cout << "[DCR_Solver] Wall recycling: T{e=" << boundary_temperatures.electron_eV
+                  << ", i=" << boundary_temperatures.ion_eV
+                  << "} E0=" << wall.ion_impact_energy_ev
                   << " alpha_atom=" << wall.alpha_atom
                   << " alpha_molecule=" << wall.alpha_molecule << "\n";
     }
@@ -82,7 +88,7 @@ void DCR_Solver::solve() {
     }
 
     EEDFConfig eedf_cfg;
-    EEDF eedf(config.plasma.Te_eV, eedf_cfg);
+    EEDF eedf(boundary_temperatures.electron_eV, eedf_cfg);
     eedf.normalize_on_grid(energies, weights);
     EEDFGridView grid(energies, weights, &eedf);
 

@@ -56,13 +56,14 @@ int main() {
 
     dcr::atomic::AtomicData atomic_data(cfg);
     auto plasma = test_dcr::make_plasma_state(cfg, atomic_data.get_total_states());
-    test_dcr::EEDFContext eedf(cfg.plasma.Te_eV);
+    const auto boundary_temperatures = test_dcr::plasma_temperatures_at(cfg, 0.0);
+    test_dcr::EEDFContext eedf(boundary_temperatures.electron_eV);
 
     const double ion_mass_amu = test_dcr::estimate_ion_mass_amu(cfg);
     const auto wall = dcr::physics::compute_wall_recycling(
         cfg.wall.material,
-        cfg.plasma.Te_eV,
-        cfg.plasma.Ti_eV,
+        boundary_temperatures.electron_eV,
+        boundary_temperatures.ion_eV,
         ion_mass_amu,
         cfg.wall.sheath_potential_drop
     );

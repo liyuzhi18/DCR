@@ -1,10 +1,12 @@
 #include "CellSolve.hpp"
 
 #include "../../physics/Sheath.hpp"
+#include "../core/TemperatureProfile.hpp"
 
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <vector>
 
 namespace dcr::solver {
 
@@ -104,8 +106,7 @@ dcr::base::Vector solve_replaced_system(const dcr::base::Matrix& A,
     if (A.rows() == A.cols()) {
         Eigen::FullPivLU<dcr::base::Matrix> lu(A);
         if (lu.rank() == A.rows()) {
-            const dcr::base::Matrix A_inv = lu.inverse();
-            return A_inv * b;
+            return lu.solve(b);
         }
     }
     // Fallback for rank-deficient/rectangular systems.
@@ -155,8 +156,6 @@ BackgroundSolveResult solve_background_at_cell(
         source_nuclei_from_S += mu_i * local_system.S_background(pi);
     }
 
-    const double nA_flow = flowA_new.size() > 0 ? flowA_new.cwiseMax(0.0).sum() : 0.0;
-    const double nM_flow = flowM_new.size() > 0 ? flowM_new.cwiseMax(0.0).sum() : 0.0;
     const double mu_M = 2.0;
     const double c_s_A = dcr::physics::calculate_thermal_speed(
         config.plasma.neutral_atom_temperature_eV, boundary.atom_mass_amu
@@ -165,12 +164,9 @@ BackgroundSolveResult solve_background_at_cell(
         config.plasma.neutral_molecule_temperature_eV, boundary.molecule_mass_amu
     );
     const double w_local = std::max(config.grid.poloidal_width_cm, 1e-12);
-    const double Gamma_ex_a_over_w = (c_s_A / w_local) * nA_flow;
-    const double Gamma_ex_m_over_w = (c_s_M / w_local) * nM_flow;
-
-    // Ion transport/source balance.
-    // Use the same assembled S used on RHS for the grouped recycling source term,
-    // with local exhaust terms restored.
+    // Local background exhaust only (no flow exhaust in local solve).
+    const double Gamma_ex_a_over_w = (c_s_A / w_local) * n_a;
+    const double Gamma_ex_m_over_w = (c_s_M / w_local) * n_m;
     const double L_I = source_nuclei_from_S - (Gamma_ex_a_over_w + mu_M * Gamma_ex_m_over_w);
     const double L_a = Gamma_ex_a_over_w;
     const double L_m = Gamma_ex_m_over_w;
@@ -203,7 +199,7 @@ BackgroundSolveResult solve_background_at_cell(
     const dcr::base::Matrix Rpp = extract_R_PP(local_system.R_full, boundary.P_indices);
 
     // Local background solve from Eq. (1.345) with frozen coefficients in this iteration:
-    //   R_PP n^{k+1} = (T - S), with T frozen from current iterate n^k.
+    //   R_PP n^{k+1} = A n^k - S.
     // Replace one row by atomicity closure so the singular chemistry system is well-posed.
     dcr::base::Matrix C = Rpp;
     dcr::base::Vector rhs = A * nP_guess - local_system.S_background;
@@ -213,7 +209,8 @@ BackgroundSolveResult solve_background_at_cell(
         stoich(i) = (gi >= 0 && gi < static_cast<int>(levels.size()))
             ? static_cast<double>(levels[gi].atomicity) : 1.0;
     }
-    int constraint_row = 12;
+    // Keep the marching closure row aligned with boundary closure row.
+    int constraint_row = 1;
     const double flow_nuclei = nuclei_sum(flowA_new, boundary.A_indices, levels)
                              + nuclei_sum(flowM_new, boundary.M_indices, levels);
     const double target_bg_nuclei = std::max(0.0, config.plasma.total_density - flow_nuclei);
@@ -337,21 +334,62 @@ CellImplicitResult solve_cell_implicit(
 
     const double tol = std::max(config.numerics.tolerance, 1e-12);
     const int max_iter = std::max(config.numerics.max_iterations, 1);
+    // Practical convergence gate for the outer Picard loop:
+    // if the fixed-point update is already small and the original local
+    // background balance residual is also small, stop instead of waiting for
+    // rel_change to crawl all the way down to the strict tolerance.
+    const double practical_rel_tol = std::max(100.0 * tol, 1.0e-5);
+    const double practical_resid_tol = std::max(1000.0 * tol, 1.0e-4);
+    const int practical_stop_min_iter = 10;
     const double omega_raw = config.numerics.relaxation;
+    const double omega_min = 0.005;
     const double omega_init = (omega_raw > 0.0 && omega_raw <= 1.0) ? omega_raw : 1.0;
-    double omega_iter = omega_init;
+    double omega_iter = std::clamp(omega_init, omega_min, 1.0);
     double prev_rel_change = std::numeric_limits<double>::infinity();
     int no_improve_count = 0;
+    int rel_growth_count = 0;
+    const auto cell_temperatures = evaluate_plasma_temperatures(config, x_right_cm);
 
     double last_rel = std::numeric_limits<double>::infinity();
     double last_resid_rel = std::numeric_limits<double>::infinity();
+    bool converged_by_practical = false;
+
+    // Anderson mixing on the outer fixed-point map x -> G(x), with x=[nP; flowA; flowM].
+    const int anderson_depth = 3;
+    const double anderson_reg = 1e-12;
+    const double anderson_step_limit = 5.0;
+    const double anderson_amp_limit = 10.0;
+    std::vector<dcr::base::Vector> anderson_cand_hist;
+    std::vector<dcr::base::Vector> anderson_res_hist;
+
+    const int nP_size = nP_iter.size();
+    const int nA_size = flowA_iter.size();
+    const int nM_size = flowM_iter.size();
+    const int x_size = nP_size + nA_size + nM_size;
+    auto pack_state = [&](const dcr::base::Vector& nP,
+                          const dcr::base::Vector& nA,
+                          const dcr::base::Vector& nM) {
+        dcr::base::Vector x = dcr::base::Vector::Zero(x_size);
+        if (nP_size > 0) x.segment(0, nP_size) = nP;
+        if (nA_size > 0) x.segment(nP_size, nA_size) = nA;
+        if (nM_size > 0) x.segment(nP_size + nA_size, nM_size) = nM;
+        return x;
+    };
+    auto unpack_state = [&](const dcr::base::Vector& x,
+                            dcr::base::Vector& nP,
+                            dcr::base::Vector& nA,
+                            dcr::base::Vector& nM) {
+        if (nP_size > 0) nP = x.segment(0, nP_size);
+        if (nA_size > 0) nA = x.segment(nP_size, nA_size);
+        if (nM_size > 0) nM = x.segment(nP_size + nA_size, nM_size);
+    };
 
     for (int iter = 0; iter < max_iter; ++iter) {
         const dcr::base::Vector bg_iter_full = make_background_full(nP_iter, boundary, total_states);
 
         // Step A: flow update at x_{k+1} from Eq. (1.346) with implicit block solve.
         const auto local_for_flow = assemble_local_system(
-            atomic_data, plasma, grid, boundary, bg_iter_full, flowA_iter, flowM_iter
+            config, atomic_data, plasma, grid, boundary, bg_iter_full, flowA_iter, flowM_iter, x_right_cm
         );
         const auto flow_advanced = advance_recycling_flow_one_step(
             config, atomic_data, boundary, local_for_flow, flowA_old, flowM_old, dx_cm
@@ -359,8 +397,15 @@ CellImplicitResult solve_cell_implicit(
 
         // Step B: background update at x_{k+1} from grouped Eq. (1.345).
         const auto local_for_bg = assemble_local_system(
-            atomic_data, plasma, grid, boundary, bg_iter_full,
-            flow_advanced.flowA_next, flow_advanced.flowM_next
+            config,
+            atomic_data,
+            plasma,
+            grid,
+            boundary,
+            bg_iter_full,
+            flow_advanced.flowA_next,
+            flow_advanced.flowM_next,
+            x_right_cm
         );
         const auto bg_solve = solve_background_at_cell(
             config,
@@ -376,11 +421,98 @@ CellImplicitResult solve_cell_implicit(
         dcr::base::Vector flowA_new = flow_advanced.flowA_next;
         dcr::base::Vector flowM_new = flow_advanced.flowM_next;
 
-        // Optional damping for difficult nonlinear coupling.
+        // Build current/fixed-point state vectors.
+        const dcr::base::Vector xk = pack_state(nP_iter, flowA_iter, flowM_iter);
+        const dcr::base::Vector gk = pack_state(nP_new, flowA_new, flowM_new);
+
+        // Damped candidate (legacy relaxation path).
+        dcr::base::Vector x_candidate = gk;
         if (omega_iter < 1.0) {
-            nP_new = (1.0 - omega_iter) * nP_iter + omega_iter * nP_new;
-            flowA_new = (1.0 - omega_iter) * flowA_iter + omega_iter * flowA_new;
-            flowM_new = (1.0 - omega_iter) * flowM_iter + omega_iter * flowM_new;
+            x_candidate = xk + omega_iter * (gk - xk);
+        }
+        const dcr::base::Vector r_candidate = x_candidate - xk;
+
+        bool used_anderson = false;
+        dcr::base::Vector x_next = x_candidate;
+        if (anderson_depth > 0 && x_size > 0) {
+            const int hist_take =
+                std::min(anderson_depth, static_cast<int>(anderson_cand_hist.size()));
+            const int pool_size = hist_take + 1; // history + current candidate
+            if (pool_size >= 2) {
+                const int m = pool_size - 1;
+                std::vector<dcr::base::Vector> cand_pool;
+                std::vector<dcr::base::Vector> res_pool;
+                cand_pool.reserve(static_cast<size_t>(pool_size));
+                res_pool.reserve(static_cast<size_t>(pool_size));
+                const int start = static_cast<int>(anderson_cand_hist.size()) - hist_take;
+                for (int h = start; h < static_cast<int>(anderson_cand_hist.size()); ++h) {
+                    cand_pool.push_back(anderson_cand_hist[static_cast<size_t>(h)]);
+                    res_pool.push_back(anderson_res_hist[static_cast<size_t>(h)]);
+                }
+                cand_pool.push_back(x_candidate);
+                res_pool.push_back(r_candidate);
+
+                const dcr::base::Vector& r_ref = res_pool.back();
+                dcr::base::Matrix B = dcr::base::Matrix::Zero(x_size, m);
+                dcr::base::Matrix dC = dcr::base::Matrix::Zero(x_size, m);
+                for (int j = 0; j < m; ++j) {
+                    B.col(j) = res_pool[static_cast<size_t>(j)] - r_ref;
+                    dC.col(j) = cand_pool[static_cast<size_t>(j)] - cand_pool.back();
+                }
+                const dcr::base::Vector rhs = -r_ref;
+                dcr::base::Matrix BtB = B.transpose() * B;
+                BtB.diagonal().array() += anderson_reg;
+                const dcr::base::Vector beta = BtB.ldlt().solve(B.transpose() * rhs);
+                if (beta.allFinite()) {
+                    const dcr::base::Vector x_mix = cand_pool.back() + dC * beta;
+                    if (x_mix.allFinite()) {
+                        const double scale_xk = std::max(1.0, xk.cwiseAbs().maxCoeff());
+                        const double rel_cand = (x_candidate - xk).cwiseAbs().maxCoeff() / scale_xk;
+                        const double rel_mix = (x_mix - xk).cwiseAbs().maxCoeff() / scale_xk;
+                        const double max_cand = x_candidate.cwiseAbs().maxCoeff();
+                        const double max_mix = x_mix.cwiseAbs().maxCoeff();
+                        const bool stable_mix =
+                            rel_mix <= anderson_step_limit * std::max(rel_cand, 1e-14) &&
+                            max_mix <= anderson_amp_limit * std::max(1.0, max_cand);
+                        if (stable_mix) {
+                            x_next = x_mix;
+                            used_anderson = true;
+                        } else {
+                            // Bad extrapolation direction: fall back and reset memory.
+                            anderson_cand_hist.clear();
+                            anderson_res_hist.clear();
+                        }
+                    }
+                }
+            }
+        }
+
+        unpack_state(x_next, nP_new, flowA_new, flowM_new);
+        // Physical safeguards after mixing.
+        nP_new = nP_new.cwiseMax(0.0);
+        flowA_new = flowA_new.cwiseMax(0.0);
+        flowM_new = flowM_new.cwiseMax(0.0);
+        {
+            const double flow_nuclei_next =
+                nuclei_sum(flowA_new, boundary.A_indices, levels) +
+                nuclei_sum(flowM_new, boundary.M_indices, levels);
+            const double target_bg_nuclei_next =
+                std::max(0.0, config.plasma.total_density - flow_nuclei_next);
+            const double bg_nuclei_now = nuclei_sum_background(nP_new, boundary, levels);
+            if (target_bg_nuclei_next <= 0.0) {
+                nP_new.setZero();
+            } else if (bg_nuclei_now > 0.0) {
+                nP_new *= (target_bg_nuclei_next / bg_nuclei_now);
+            }
+        }
+        // Keep the map evaluations for future Anderson steps.
+        if (anderson_depth > 0 && x_size > 0) {
+            anderson_cand_hist.push_back(x_candidate);
+            anderson_res_hist.push_back(r_candidate);
+            if (static_cast<int>(anderson_cand_hist.size()) > anderson_depth) {
+                anderson_cand_hist.erase(anderson_cand_hist.begin());
+                anderson_res_hist.erase(anderson_res_hist.begin());
+            }
         }
 
         const double rel_np = relative_change(nP_new, nP_iter);
@@ -398,8 +530,23 @@ CellImplicitResult solve_cell_implicit(
         } else {
             no_improve_count = 0;
         }
-        if (no_improve_count >= 5 && omega_iter > 0.1) {
-            omega_iter = std::max(0.1, 0.5 * omega_iter);
+        if (std::isfinite(prev_rel_change) && rel > prev_rel_change * 1.001) {
+            ++rel_growth_count;
+        } else {
+            rel_growth_count = 0;
+        }
+
+        if (rel_growth_count >= 3 && omega_iter > omega_min) {
+            omega_iter = std::max(omega_min, 0.5 * omega_iter);
+            rel_growth_count = 0;
+            no_improve_count = 0;
+            if (config.io.verbose_logging && detailed_log) {
+                std::cout << "[DCR_Solver] Marching cell " << cell_index
+                          << ": rel_change growth detected, reducing relaxation to "
+                          << omega_iter << "\n";
+            }
+        } else if (no_improve_count >= 5 && omega_iter > omega_min) {
+            omega_iter = std::max(omega_min, 0.5 * omega_iter);
             no_improve_count = 0;
             if (config.io.verbose_logging && detailed_log) {
                 std::cout << "[DCR_Solver] Marching cell " << cell_index
@@ -407,8 +554,8 @@ CellImplicitResult solve_cell_implicit(
                           << omega_iter << "\n";
             }
         }
-        if (((iter + 1) % 50 == 0) && rel > (10.0 * tol) && omega_iter > 0.1) {
-            omega_iter = std::max(0.1, 0.5 * omega_iter);
+        if (((iter + 1) % 50 == 0) && rel > (10.0 * tol) && omega_iter > omega_min) {
+            omega_iter = std::max(omega_min, 0.5 * omega_iter);
             if (config.io.verbose_logging && detailed_log) {
                 std::cout << "[DCR_Solver] Marching cell " << cell_index
                           << ": periodic damping, reducing relaxation to "
@@ -428,6 +575,9 @@ CellImplicitResult solve_cell_implicit(
             const double flowM_nuc_iter = nuclei_sum(flowM_new, boundary.M_indices, levels);
             std::cout << "[DCR_Solver] Marching cell " << cell_index
                       << " x=[" << x_left_cm << "," << x_right_cm << "] cm"
+                      << " T{e=" << cell_temperatures.electron_eV
+                      << ", i=" << cell_temperatures.ion_eV
+                      << "}"
                       << " iter " << (iter + 1)
                       << " rel_change=" << rel
                       << " rel_np=" << rel_np
@@ -436,6 +586,7 @@ CellImplicitResult solve_cell_implicit(
                       << " ||Rpp*n-(A*n-S)||=" << bg_solve.linear_residual_norm
                       << " resid_rel(diag)=" << resid_rel
                       << " omega=" << omega_iter
+                      << " anderson=" << (used_anderson ? "on" : "off")
                       << " flow_sum{A=" << flowA_sum_iter
                       << ", M=" << flowM_sum_iter
                       << "} flow_nuclei{A=" << flowA_nuc_iter
@@ -443,11 +594,37 @@ CellImplicitResult solve_cell_implicit(
                       << "}"
                       << "\n";
 
+            if (cell_index == 1) {
+                const auto bg_iter = summarize_bg_subgroups(nP_new, boundary, levels);
+                const double bg_nuc_iter = nuclei_sum_background(nP_new, boundary, levels);
+                const double total_nuc_iter = bg_nuc_iter + flowA_nuc_iter + flowM_nuc_iter;
+                std::cout << "[DCR_Solver] Marching cell 1 densities"
+                          << " iter " << (iter + 1)
+                          << " bg{H+=" << bg_iter.H_plus
+                          << ", H=" << bg_iter.H
+                          << ", H2=" << bg_iter.H2
+                          << ", H2+=" << bg_iter.H2_plus
+                          << ", H-=" << bg_iter.H_minus
+                          << "} flow{A=" << flowA_sum_iter
+                          << ", M=" << flowM_sum_iter
+                          << "} nuclei{bg=" << bg_nuc_iter
+                          << ", total=" << total_nuc_iter
+                          << "}\n";
+            }
+
         }
 
-        if (rel < tol) {
+        const bool strict_converged = (rel < tol);
+        const bool practical_converged =
+            (iter + 1 >= practical_stop_min_iter) &&
+            std::isfinite(resid_rel) &&
+            (rel < practical_rel_tol) &&
+            (resid_rel < practical_resid_tol);
+
+        if (strict_converged || practical_converged) {
             out.iterations = iter + 1;
             out.converged = true;
+            converged_by_practical = practical_converged && !strict_converged;
             break;
         }
         if (iter == max_iter - 1) {
@@ -462,7 +639,7 @@ CellImplicitResult solve_cell_implicit(
 
     const dcr::base::Vector bg_full = make_background_full(out.nP_new, boundary, total_states);
     out.local_final = assemble_local_system(
-        atomic_data, plasma, grid, boundary, bg_full, out.flowA_new, out.flowM_new
+        config, atomic_data, plasma, grid, boundary, bg_full, out.flowA_new, out.flowM_new, x_right_cm
     );
     out.flow_final = advance_recycling_flow_one_step(
         config, atomic_data, boundary, out.local_final, out.flowA_new, out.flowM_new, 0.0
@@ -486,7 +663,12 @@ CellImplicitResult solve_cell_implicit(
         const double flowM_total = positive_sum(out.flowM_new);
         std::cout << "[DCR_Solver] Marching cell " << cell_index
                   << " x=" << x_right_cm << " cm"
-                  << (out.converged ? " converged" : " max-iter")
+                  << " T{e=" << cell_temperatures.electron_eV
+                  << ", i=" << cell_temperatures.ion_eV
+                  << "}"
+                  << (out.converged
+                          ? (converged_by_practical ? " converged(practical)" : " converged")
+                          : " max-iter")
                   << " in " << out.iterations
                   << " iterations (rel=" << last_rel
                   << ", resid_rel(diag)=" << out.final_resid_rel << ")"

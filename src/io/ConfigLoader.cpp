@@ -4,6 +4,24 @@
 #include <stdexcept>
 
 namespace dcr::io {
+    namespace {
+
+    void load_temperature_profile(const YAML::Node& node,
+                                  TemperatureProfileConfig& profile,
+                                  base::Real fallback_eV) {
+        if (!node) return;
+
+        profile.enabled = node["enabled"].as<bool>(true);
+        profile.type = node["type"].as<std::string>("constant");
+        profile.value_eV = node["value_eV"].as<base::Real>(fallback_eV);
+        profile.x_start_cm = node["x_start_cm"].as<base::Real>(0.0);
+        profile.x_end_cm = node["x_end_cm"].as<base::Real>(profile.x_start_cm);
+        profile.value_start_eV = node["value_start_eV"].as<base::Real>(fallback_eV);
+        profile.value_end_eV = node["value_end_eV"].as<base::Real>(profile.value_start_eV);
+    }
+
+    } // namespace
+
     Config ConfigLoader::load(const std::string& filepath) {
 
         Config config;
@@ -54,6 +72,16 @@ namespace dcr::io {
             config.plasma.total_density = p["total_density_cm3"].as<base::Real>();
             config.plasma.Te_eV = p["Te_eV"].as<base::Real>();
             config.plasma.Ti_eV = p["Ti_eV"].as<base::Real>();
+            load_temperature_profile(
+                p["electron_temperature_profile"],
+                config.plasma.electron_temperature_profile,
+                config.plasma.Te_eV
+            );
+            load_temperature_profile(
+                p["ion_temperature_profile"],
+                config.plasma.ion_temperature_profile,
+                config.plasma.Ti_eV
+            );
             config.plasma.neutral_atom_temperature_eV = p["neutral_atom_temperature_eV"].as<base::Real>(0.1);
             config.plasma.neutral_molecule_temperature_eV = p["neutral_molecule_temperature_eV"].as<base::Real>(0.1);
 

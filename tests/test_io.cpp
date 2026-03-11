@@ -40,6 +40,15 @@ int main() {
         "  total_density_cm3: 1e14\n"
         "  Te_eV: 5.0\n"
         "  Ti_eV: 2.0\n"
+        "  electron_temperature_profile:\n"
+        "    type: linear_x\n"
+        "    x_start_cm: 0.0\n"
+        "    x_end_cm: 2.0\n"
+        "    value_start_eV: 1.0\n"
+        "    value_end_eV: 5.0\n"
+        "  ion_temperature_profile:\n"
+        "    type: constant\n"
+        "    value_eV: 1.5\n"
         "  neutral_atom_temperature_eV: 0.2\n"
         "  neutral_molecule_temperature_eV: 0.15\n"
         "  initial_conditions:\n"
@@ -79,6 +88,15 @@ int main() {
     assert(cfg.plasma.total_density == 1e14);
     assert(cfg.plasma.Te_eV == 5.0);
     assert(cfg.plasma.Ti_eV == 2.0);
+    assert(cfg.plasma.electron_temperature_profile.enabled == true);
+    assert(cfg.plasma.electron_temperature_profile.type == "linear_x");
+    assert(cfg.plasma.electron_temperature_profile.x_start_cm == 0.0);
+    assert(cfg.plasma.electron_temperature_profile.x_end_cm == 2.0);
+    assert(cfg.plasma.electron_temperature_profile.value_start_eV == 1.0);
+    assert(cfg.plasma.electron_temperature_profile.value_end_eV == 5.0);
+    assert(cfg.plasma.ion_temperature_profile.enabled == true);
+    assert(cfg.plasma.ion_temperature_profile.type == "constant");
+    assert(cfg.plasma.ion_temperature_profile.value_eV == 1.5);
     assert(cfg.plasma.neutral_atom_temperature_eV == 0.2);
     assert(cfg.plasma.neutral_molecule_temperature_eV == 0.15);
     assert(cfg.plasma.initial_conditions.size() == 1);
@@ -123,6 +141,8 @@ int main() {
     assert(cfg_defaults.numerics.max_iterations == 1000);
     assert(cfg_defaults.numerics.relaxation == 1.0);
 
+    assert(cfg_defaults.plasma.electron_temperature_profile.enabled == false);
+    assert(cfg_defaults.plasma.ion_temperature_profile.enabled == false);
     assert(cfg_defaults.plasma.neutral_atom_temperature_eV == 0.1);
     assert(cfg_defaults.plasma.neutral_molecule_temperature_eV == 0.1);
 

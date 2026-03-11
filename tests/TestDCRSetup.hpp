@@ -15,6 +15,7 @@
 #include "../src/physics/WallBoundary.hpp"
 #include "../src/solver/boundary/BoundaryPhase.hpp"
 #include "../src/solver/core/ConfigPaths.hpp"
+#include "../src/solver/core/TemperatureProfile.hpp"
 #include "../src/state/PlasmaState.hpp"
 
 namespace test_dcr {
@@ -61,6 +62,11 @@ inline double estimate_ion_mass_amu(const dcr::io::Config& cfg) {
         }
     }
     return 1.0;
+}
+
+inline dcr::solver::PlasmaTemperatures plasma_temperatures_at(const dcr::io::Config& cfg,
+                                                              double x_cm) {
+    return dcr::solver::evaluate_plasma_temperatures(cfg, x_cm);
 }
 
 struct EEDFContext {

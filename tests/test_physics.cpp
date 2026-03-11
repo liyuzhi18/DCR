@@ -18,7 +18,7 @@ int main() {
     std::cout << std::scientific << std::setprecision(4);
 
     double Te = 10.0;
-    double Ti = 0.0;
+    double Ti = 5.0;
     double mass_amu = 2.0; 
 
     // Manual Calculation Check:
@@ -30,6 +30,7 @@ int main() {
     double expected_cs = 2.1964e6;
 
     double cs = dcr::physics::calculate_Bohm_speed(Te, Ti, mass_amu);
+    double cs_ti0 = dcr::physics::calculate_Bohm_speed(Te, 0.0, mass_amu);
     
     std::cout << "  Calculated c_s (D, 10eV): " << cs << " cm/s\n";
     std::cout << "  Expected   c_s          : " << expected_cs << " cm/s\n";
@@ -38,6 +39,10 @@ int main() {
         std::cout << "[PASS] Bohm Speed logic is correct.\n";
     } else {
         std::cerr << "[FAIL] Bohm Speed mismatch!\n";
+        return 1;
+    }
+    if (!is_close(cs, cs_ti0, 1e-12)) {
+        std::cerr << "[FAIL] Bohm Speed should ignore Ti.\n";
         return 1;
     }
 
@@ -79,13 +84,18 @@ int main() {
 
     // --- Case 4: Ion impact energy at sheath entrance ---
     double sheath_drop = 3.0; // ~3*Te
-    double expected_E0 = 0.5 * Te + sheath_drop * Te; // Ti=0, gamma_i=0
+    double expected_E0 = 0.5 * Te + sheath_drop * Te;
     double E0 = dcr::physics::calculate_ion_impact_energy_ev(Te, Ti, mass_amu, sheath_drop);
+    double E0_ti0 = dcr::physics::calculate_ion_impact_energy_ev(Te, 0.0, mass_amu, sheath_drop);
     std::cout << "\n  Ion impact energy (Te=10eV, drop=3Te): " << E0 << " eV\n";
     if (is_close(E0, expected_E0, 1e-3)) {
         std::cout << "[PASS] Ion impact energy logic is correct.\n";
     } else {
         std::cerr << "[FAIL] Ion impact energy mismatch!\n";
+        return 1;
+    }
+    if (!is_close(E0, E0_ti0, 1e-12)) {
+        std::cerr << "[FAIL] Ion impact energy should ignore Ti through Bohm speed.\n";
         return 1;
     }
 

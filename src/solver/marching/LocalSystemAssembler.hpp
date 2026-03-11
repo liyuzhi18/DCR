@@ -22,12 +22,14 @@ struct LocalSystem {
 // - full CR matrix R,
 // - recycling source S projected on background equations.
 LocalSystem assemble_local_system(
+    const dcr::io::Config& config,
     const dcr::atomic::AtomicData& atomic_data,
     const dcr::state::PlasmaState& plasma,
     const EEDFGridView& grid,
     const BoundaryPhaseResult& boundary,
     const dcr::base::Vector& background_population,
     const dcr::base::Vector& flowA,
-    const dcr::base::Vector& flowM);
+    const dcr::base::Vector& flowM,
+    double x_cm);
 
 } // namespace dcr::solver

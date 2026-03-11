@@ -18,13 +18,14 @@ int main() {
 
     dcr::atomic::AtomicData atomic_data(cfg);
     auto plasma = test_dcr::make_plasma_state(cfg, atomic_data.get_total_states());
-    test_dcr::EEDFContext eedf(cfg.plasma.Te_eV);
+    const auto boundary_temperatures = test_dcr::plasma_temperatures_at(cfg, 0.0);
+    test_dcr::EEDFContext eedf(boundary_temperatures.electron_eV);
 
     const double ion_mass_amu = test_dcr::estimate_ion_mass_amu(cfg);
     const auto wall = dcr::physics::compute_wall_recycling(
         cfg.wall.material,
-        cfg.plasma.Te_eV,
-        cfg.plasma.Ti_eV,
+        boundary_temperatures.electron_eV,
+        boundary_temperatures.ion_eV,
         ion_mass_amu,
         cfg.wall.sheath_potential_drop
     );
@@ -41,6 +42,7 @@ int main() {
     assert(history.background_full.size() == n_nodes);
     assert(history.flowA.size() == n_nodes);
     assert(history.flowM.size() == n_nodes);
+    assert(history.rate_diagnostics.size() == n_nodes);
 
     for (size_t k = 1; k < history.x_cm.size(); ++k) {
         assert(history.x_cm[k] > history.x_cm[k - 1]);
@@ -59,6 +61,18 @@ int main() {
         test_dcr::assert_all_finite_nonnegative(bg);
         test_dcr::assert_all_finite_nonnegative(a);
         test_dcr::assert_all_finite_nonnegative(m);
+
+        const auto& rates = history.rate_diagnostics[k];
+        assert(std::isfinite(rates.electron_temperature_eV));
+        assert(std::isfinite(rates.ion_temperature_eV));
+        assert(std::isfinite(rates.electron_density_cm3));
+        assert(rates.electron_density_cm3 >= 0.0);
+        assert(std::isfinite(rates.atomic_effective.scd_cm3_s));
+        assert(std::isfinite(rates.atomic_effective.acd_cm3_s));
+        assert(rates.atomic_effective.scd_cm3_s >= 0.0);
+        assert(rates.atomic_effective.acd_cm3_s >= 0.0);
+        assert(std::isfinite(rates.atomic_qss.max_transport_to_local_ratio));
+        assert(std::isfinite(rates.atomic_qss.max_transport_to_loss_frequency_ratio));
 
         const double total_nuclei =
             test_dcr::nuclei_total_full(bg, levels) +

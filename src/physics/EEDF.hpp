@@ -107,6 +107,9 @@ public:
     double value_at(size_t i) const { return eedf_ ? (*eedf_)(energies_[i]) : 0.0; }
     double eval(double E) const { return eedf_ ? (*eedf_)(E) : 0.0; }
     bool valid() const { return eedf_ != nullptr; }
+    const std::vector<double>& energies() const { return energies_; }
+    const std::vector<double>& weights() const { return weights_; }
+    const EEDF* eedf() const { return eedf_; }
 
 private:
     const std::vector<double>& energies_;

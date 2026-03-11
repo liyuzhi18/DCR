@@ -120,6 +120,42 @@ std::vector<double> build_total_nuclei_profile(
     return out;
 }
 
+std::vector<double> collect_rate_scalar(
+    const std::vector<RateDiagnosticSnapshot>& snapshots,
+    double RateDiagnosticSnapshot::* member) {
+    std::vector<double> out;
+    out.reserve(snapshots.size());
+    for (const auto& snap : snapshots) out.push_back(snap.*member);
+    return out;
+}
+
+std::vector<double> collect_atomic_effective_scalar(
+    const std::vector<RateDiagnosticSnapshot>& snapshots,
+    double AtomicEffectiveRates::* member) {
+    std::vector<double> out;
+    out.reserve(snapshots.size());
+    for (const auto& snap : snapshots) out.push_back(snap.atomic_effective.*member);
+    return out;
+}
+
+std::vector<double> collect_atomic_qss_scalar(
+    const std::vector<RateDiagnosticSnapshot>& snapshots,
+    double AtomicQSSDiagnostics::* member) {
+    std::vector<double> out;
+    out.reserve(snapshots.size());
+    for (const auto& snap : snapshots) out.push_back(snap.atomic_qss.*member);
+    return out;
+}
+
+std::vector<dcr::base::Vector> collect_atomic_qss_vector(
+    const std::vector<RateDiagnosticSnapshot>& snapshots,
+    dcr::base::Vector AtomicQSSDiagnostics::* member) {
+    std::vector<dcr::base::Vector> out;
+    out.reserve(snapshots.size());
+    for (const auto& snap : snapshots) out.push_back(snap.atomic_qss.*member);
+    return out;
+}
+
 } // namespace
 
 void write_hdf5_output(
@@ -144,6 +180,7 @@ void write_hdf5_output(
     file.createGroup("/grid");
     file.createGroup("/states");
     file.createGroup("/population");
+    file.createGroup("/rates");
 
     // Grid
     write_vector_double(file, "/grid/x_cm", history.x_cm);
@@ -189,6 +226,62 @@ void write_hdf5_output(
     write_matrix(file, "/population/total_full", total_pop, atomic_data.get_total_states());
     const auto n_nuclei_cm3 = build_total_nuclei_profile(total_pop, levels);
     write_vector_double(file, "/grid/n_nuclei_cm3", n_nuclei_cm3);
+
+    // Local rate diagnostics.
+    write_vector_double(file, "/rates/Te_eV", collect_rate_scalar(history.rate_diagnostics, &RateDiagnosticSnapshot::electron_temperature_eV));
+    write_vector_double(file, "/rates/Ti_eV", collect_rate_scalar(history.rate_diagnostics, &RateDiagnosticSnapshot::ion_temperature_eV));
+    write_vector_double(file, "/rates/ne_cm3", collect_rate_scalar(history.rate_diagnostics, &RateDiagnosticSnapshot::electron_density_cm3));
+    write_vector_double(file, "/rates/atomic_scd_cm3_s",
+                        collect_atomic_effective_scalar(history.rate_diagnostics, &AtomicEffectiveRates::scd_cm3_s));
+    write_vector_double(file, "/rates/atomic_acd_cm3_s",
+                        collect_atomic_effective_scalar(history.rate_diagnostics, &AtomicEffectiveRates::acd_cm3_s));
+    write_vector_double(file, "/rates/atomic_qss_transport_frequency_s",
+                        collect_atomic_qss_scalar(history.rate_diagnostics, &AtomicQSSDiagnostics::transport_frequency_s));
+    write_vector_double(file, "/rates/atomic_qss_max_transport_to_local_ratio",
+                        collect_atomic_qss_scalar(history.rate_diagnostics, &AtomicQSSDiagnostics::max_transport_to_local_ratio));
+    write_vector_double(file, "/rates/atomic_qss_max_transport_to_loss_frequency_ratio",
+                        collect_atomic_qss_scalar(history.rate_diagnostics, &AtomicQSSDiagnostics::max_transport_to_loss_frequency_ratio));
+
+    if (!history.rate_diagnostics.empty()) {
+        std::vector<int> excited_indices;
+        for (const auto& snapshot : history.rate_diagnostics) {
+            if (!snapshot.atomic_qss.excited_indices.empty()) {
+                excited_indices = snapshot.atomic_qss.excited_indices;
+                break;
+            }
+        }
+        if (!excited_indices.empty()) {
+            std::vector<std::string> excited_labels;
+            excited_labels.reserve(excited_indices.size());
+            for (int gi : excited_indices) {
+                if (gi >= 0 && gi < static_cast<int>(levels.size())) {
+                    excited_labels.push_back(levels[static_cast<size_t>(gi)].label);
+                } else {
+                    excited_labels.emplace_back("unknown");
+                }
+            }
+            write_vector_int(file, "/rates/atomic_excited_indices", excited_indices);
+            write_string_vector(file, "/rates/atomic_excited_labels", excited_labels);
+            write_matrix(file, "/rates/atomic_excited_transport_rate_cm3_s",
+                         collect_atomic_qss_vector(history.rate_diagnostics, &AtomicQSSDiagnostics::transport_rate_cm3_s),
+                         static_cast<int>(excited_indices.size()));
+            write_matrix(file, "/rates/atomic_excited_local_source_rate_cm3_s",
+                         collect_atomic_qss_vector(history.rate_diagnostics, &AtomicQSSDiagnostics::local_source_rate_cm3_s),
+                         static_cast<int>(excited_indices.size()));
+            write_matrix(file, "/rates/atomic_excited_local_loss_rate_cm3_s",
+                         collect_atomic_qss_vector(history.rate_diagnostics, &AtomicQSSDiagnostics::local_loss_rate_cm3_s),
+                         static_cast<int>(excited_indices.size()));
+            write_matrix(file, "/rates/atomic_excited_local_loss_frequency_s",
+                         collect_atomic_qss_vector(history.rate_diagnostics, &AtomicQSSDiagnostics::local_loss_frequency_s),
+                         static_cast<int>(excited_indices.size()));
+            write_matrix(file, "/rates/atomic_excited_transport_to_local_ratio",
+                         collect_atomic_qss_vector(history.rate_diagnostics, &AtomicQSSDiagnostics::transport_to_local_ratio),
+                         static_cast<int>(excited_indices.size()));
+            write_matrix(file, "/rates/atomic_excited_transport_to_loss_frequency_ratio",
+                         collect_atomic_qss_vector(history.rate_diagnostics, &AtomicQSSDiagnostics::transport_to_loss_frequency_ratio),
+                         static_cast<int>(excited_indices.size()));
+        }
+    }
 
     if (config.io.verbose_logging) {
         std::cout << "[DCR_Solver] Wrote HDF5 output: " << out_file.string() << "\n";

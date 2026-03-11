@@ -75,6 +75,79 @@ std::vector<double> build_step_sizes_cm(const dcr::io::Config& config) {
     return dx;
 }
 
+int max_index(const dcr::base::Vector& values) {
+    int best = -1;
+    double best_value = -1.0;
+    for (int i = 0; i < values.size(); ++i) {
+        if (!std::isfinite(values(i))) continue;
+        if (values(i) > best_value) {
+            best_value = values(i);
+            best = i;
+        }
+    }
+    return best;
+}
+
+void log_rate_snapshot(double x_cm,
+                       const RateDiagnosticSnapshot& snapshot,
+                       const std::vector<dcr::atomic::EnergyLevel>& levels) {
+    if (!snapshot.atomic_effective.valid && !snapshot.atomic_qss.valid) return;
+
+    std::cout << "[DCR_Solver][Rates][plasma] x=" << x_cm
+              << " cm Te=" << snapshot.electron_temperature_eV
+              << " Ti=" << snapshot.ion_temperature_eV
+              << " ne=" << snapshot.electron_density_cm3
+              << "\n";
+
+    if (snapshot.atomic_effective.valid) {
+        std::cout << "[DCR_Solver][Rates][atomic] x=" << x_cm
+                  << " cm SCD=" << snapshot.atomic_effective.scd_cm3_s
+                  << " ACD=" << snapshot.atomic_effective.acd_cm3_s
+                  << "\n";
+    }
+
+    if (!snapshot.atomic_qss.valid) return;
+
+    std::cout << "[DCR_Solver][Rates][qss] x=" << x_cm
+              << " cm transport_frequency=" << snapshot.atomic_qss.transport_frequency_s
+              << " max_transport_to_local=" << snapshot.atomic_qss.max_transport_to_local_ratio
+              << " max_transport_to_lossfreq=" << snapshot.atomic_qss.max_transport_to_loss_frequency_ratio
+              << "\n";
+
+    const int worst_local = max_index(snapshot.atomic_qss.transport_to_local_ratio);
+    if (worst_local >= 0 &&
+        worst_local < static_cast<int>(snapshot.atomic_qss.excited_indices.size())) {
+        const int gi = snapshot.atomic_qss.excited_indices[static_cast<size_t>(worst_local)];
+        const std::string label =
+            (gi >= 0 && gi < static_cast<int>(levels.size())) ? levels[static_cast<size_t>(gi)].label : "unknown";
+        std::cout << "[DCR_Solver][Rates][qss_state] x=" << x_cm
+                  << " cm metric=transport_to_local"
+                  << " state=" << gi
+                  << " label=\"" << label << "\""
+                  << " transport=" << snapshot.atomic_qss.transport_rate_cm3_s(worst_local)
+                  << " source=" << snapshot.atomic_qss.local_source_rate_cm3_s(worst_local)
+                  << " loss=" << snapshot.atomic_qss.local_loss_rate_cm3_s(worst_local)
+                  << " ratio=" << snapshot.atomic_qss.transport_to_local_ratio(worst_local)
+                  << "\n";
+    }
+
+    const int worst_lossfreq = max_index(snapshot.atomic_qss.transport_to_loss_frequency_ratio);
+    if (worst_lossfreq >= 0 &&
+        worst_lossfreq < static_cast<int>(snapshot.atomic_qss.excited_indices.size())) {
+        const int gi = snapshot.atomic_qss.excited_indices[static_cast<size_t>(worst_lossfreq)];
+        const std::string label =
+            (gi >= 0 && gi < static_cast<int>(levels.size())) ? levels[static_cast<size_t>(gi)].label : "unknown";
+        std::cout << "[DCR_Solver][Rates][qss_state] x=" << x_cm
+                  << " cm metric=transport_to_lossfreq"
+                  << " state=" << gi
+                  << " label=\"" << label << "\""
+                  << " transport_frequency=" << snapshot.atomic_qss.transport_frequency_s
+                  << " loss_frequency=" << snapshot.atomic_qss.local_loss_frequency_s(worst_lossfreq)
+                  << " ratio=" << snapshot.atomic_qss.transport_to_loss_frequency_ratio(worst_lossfreq)
+                  << "\n";
+    }
+}
+
 } // namespace
 
 MarchingHistory run_full_marching(
@@ -109,6 +182,8 @@ MarchingHistory run_full_marching(
     if (config.io.verbose_logging) {
         std::cout << "[DCR_Solver] Marching mode: fixed-point (constant nuclei closure)\n";
     }
+
+    const AtomicRateCalculator rate_calculator(atomic_data);
 
     // Initialize compact background state from boundary solution.
     dcr::base::Vector nP = dcr::base::Vector::Zero(Pn);
@@ -147,9 +222,21 @@ MarchingHistory run_full_marching(
     history.background_full.reserve(static_cast<size_t>(n_nodes));
     history.flowA.reserve(static_cast<size_t>(n_nodes));
     history.flowM.reserve(static_cast<size_t>(n_nodes));
-    history.background_full.push_back(make_background_full(nP, boundary, total_states));
+    history.rate_diagnostics.reserve(static_cast<size_t>(n_nodes));
+
+    const dcr::base::Vector bg_full_boundary = make_background_full(nP, boundary, total_states);
+    history.background_full.push_back(bg_full_boundary);
     history.flowA.push_back(flowA);
     history.flowM.push_back(flowM);
+    const auto boundary_local = assemble_local_system(
+        config, atomic_data, plasma, grid, boundary, bg_full_boundary, flowA, flowM, 0.0
+    );
+    history.rate_diagnostics.push_back(
+        rate_calculator.evaluate(config, boundary, boundary_local, bg_full_boundary, 0.0)
+    );
+    if (config.io.verbose_logging) {
+        log_rate_snapshot(0.0, history.rate_diagnostics.back(), levels);
+    }
 
     // Optional per-cell debug logging control:
     // - default detailed iteration log remains cell 1 only.
@@ -260,6 +347,12 @@ MarchingHistory run_full_marching(
         history.background_full.push_back(bg_full);
         history.flowA.push_back(flowA);
         history.flowM.push_back(flowM);
+        history.rate_diagnostics.push_back(
+            rate_calculator.evaluate(config, boundary, step.local_final, bg_full, x_right)
+        );
+        if (config.io.verbose_logging) {
+            log_rate_snapshot(x_right, history.rate_diagnostics.back(), levels);
+        }
 
         // Preserve detailed first-cell diagnostics for model verification.
         if (k == 0) {

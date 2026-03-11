@@ -61,13 +61,14 @@ int main() {
 
     dcr::atomic::AtomicData atomic_data(cfg);
     auto plasma = test_dcr::make_plasma_state(cfg, atomic_data.get_total_states());
-    test_dcr::EEDFContext eedf(cfg.plasma.Te_eV);
+    const auto boundary_temperatures = test_dcr::plasma_temperatures_at(cfg, 0.0);
+    test_dcr::EEDFContext eedf(boundary_temperatures.electron_eV);
 
     const double ion_mass_amu = test_dcr::estimate_ion_mass_amu(cfg);
     const auto wall = dcr::physics::compute_wall_recycling(
         cfg.wall.material,
-        cfg.plasma.Te_eV,
-        cfg.plasma.Ti_eV,
+        boundary_temperatures.electron_eV,
+        boundary_temperatures.ion_eV,
         ion_mass_amu,
         cfg.wall.sheath_potential_drop
     );
@@ -88,7 +89,7 @@ int main() {
     test_dcr::assert_all_finite_nonnegative(flowM_old);
 
     const auto local = dcr::solver::assemble_local_system(
-        atomic_data, plasma, eedf.grid, boundary, background_full, flowA_old, flowM_old
+        cfg, atomic_data, plasma, eedf.grid, boundary, background_full, flowA_old, flowM_old, cfg.grid.length_cm
     );
     const auto advanced = dcr::solver::advance_recycling_flow_one_step(
         cfg, atomic_data, boundary, local, flowA_old, flowM_old, cfg.grid.length_cm

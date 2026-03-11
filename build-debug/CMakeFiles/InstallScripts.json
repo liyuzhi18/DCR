@@ -1,9 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/Users/asimida/Desktop/DCR_code/build-debug/cmake_install.cmake",
-		"/Users/asimida/Desktop/DCR_code/build-debug/_deps/yaml-cpp-build/cmake_install.cmake",
-		"/Users/asimida/Desktop/DCR_code/build-debug/_deps/yaml-cpp-build/util/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
