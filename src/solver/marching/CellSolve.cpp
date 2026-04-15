@@ -680,17 +680,18 @@ CellImplicitResult solve_cell_implicit(
 
         const dcr::base::Vector bg_iter_full =
             make_background_full(eval.nP_iter, boundary, total_states);
-        const auto local_for_flow = assemble_local_system(
+        const auto background_rates = assemble_background_rate_matrix(
             config,
             atomic_data,
             plasma,
             grid,
-            boundary,
             bg_iter_full,
-            eval.flowA_iter,
-            eval.flowM_iter,
             x_right_cm
         );
+        LocalSystem local_for_flow;
+        local_for_flow.population_for_rates = background_rates.population_for_rates;
+        local_for_flow.R_full = background_rates.R_full;
+        local_for_flow.S_background = dcr::base::Vector::Zero(static_cast<int>(boundary.P_indices.size()));
         eval.flow_advanced = advance_recycling_flow_one_step(
             config,
             atomic_data,
@@ -700,13 +701,13 @@ CellImplicitResult solve_cell_implicit(
             flowM_inflow,
             dx_cm
         );
-        eval.local_for_bg = assemble_local_system(
+        eval.local_for_bg = assemble_local_system_from_background_rate_matrix(
             config,
             atomic_data,
             plasma,
             grid,
             boundary,
-            bg_iter_full,
+            background_rates,
             eval.flow_advanced.flowA_next,
             eval.flow_advanced.flowM_next,
             x_right_cm
@@ -1006,25 +1007,29 @@ CellImplicitResult solve_cell_implicit(
 
     for (int iter = 0; iter < max_iter; ++iter) {
         const dcr::base::Vector bg_iter_full = make_background_full(nP_iter, boundary, total_states);
+        const auto background_rates = assemble_background_rate_matrix(
+            config, atomic_data, plasma, grid, bg_iter_full, x_right_cm
+        );
 
         // Step A: flow update at x_{k+1} from Eq. (1.346) with implicit upwind march.
         // The inner Picard loop updates the local cell state, but the left-cell inflow
         // stays fixed during the solve for this spatial step.
-        const auto local_for_flow = assemble_local_system(
-            config, atomic_data, plasma, grid, boundary, bg_iter_full, flowA_iter, flowM_iter, x_right_cm
-        );
+        LocalSystem local_for_flow;
+        local_for_flow.population_for_rates = background_rates.population_for_rates;
+        local_for_flow.R_full = background_rates.R_full;
+        local_for_flow.S_background = dcr::base::Vector::Zero(static_cast<int>(boundary.P_indices.size()));
         const auto flow_advanced = advance_recycling_flow_one_step(
             config, atomic_data, boundary, local_for_flow, flowA_inflow, flowM_inflow, dx_cm
         );
 
         // Step B: background update at x_{k+1} from grouped Eq. (1.345).
-        const auto local_for_bg = assemble_local_system(
+        const auto local_for_bg = assemble_local_system_from_background_rate_matrix(
             config,
             atomic_data,
             plasma,
             grid,
             boundary,
-            bg_iter_full,
+            background_rates,
             flow_advanced.flowA_next,
             flow_advanced.flowM_next,
             x_right_cm

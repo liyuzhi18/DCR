@@ -63,27 +63,20 @@ dcr::base::Vector sanitize_background_population(const dcr::base::Vector& backgr
 
 } // namespace
 
-LocalSystem assemble_local_system(
+BackgroundRateAssembly assemble_background_rate_matrix(
     const dcr::io::Config& config,
     const dcr::atomic::AtomicData& atomic_data,
     const dcr::state::PlasmaState& plasma,
     const EEDFGridView& grid,
-    const BoundaryPhaseResult& boundary,
     const dcr::base::Vector& background_population,
-    const dcr::base::Vector& flowA,
-    const dcr::base::Vector& flowM,
     double x_cm) {
-    LocalSystem out;
+    BackgroundRateAssembly out;
     const int total_states = atomic_data.get_total_states();
     const auto& levels = atomic_data.get_levels();
     const auto temperatures = evaluate_plasma_temperatures(config, x_cm);
     out.population_for_rates = sanitize_background_population(background_population, total_states);
     out.R_full = dcr::base::Matrix::Zero(total_states, total_states);
 
-    // Use background-only population for the main R assembly (match boundary behavior).
-    // Recycling-flow populations are not injected into out.R_full.
-
-    // Update ne from quasi-neutrality at this spatial/iterative state.
     const double ne_local = quasineutral_electron_density(out.population_for_rates, levels);
     const LocalKineticContext plasma_local(
         plasma,
@@ -103,6 +96,25 @@ LocalSystem assemble_local_system(
         );
     }
     redirect_h2plus_dr_products_to_ground(config, levels, out.R_full);
+    return out;
+}
+
+LocalSystem assemble_local_system_from_background_rate_matrix(
+    const dcr::io::Config& config,
+    const dcr::atomic::AtomicData& atomic_data,
+    const dcr::state::PlasmaState& plasma,
+    const EEDFGridView& grid,
+    const BoundaryPhaseResult& boundary,
+    const BackgroundRateAssembly& background_rates,
+    const dcr::base::Vector& flowA,
+    const dcr::base::Vector& flowM,
+    double x_cm) {
+    LocalSystem out;
+    const int total_states = atomic_data.get_total_states();
+    const auto& levels = atomic_data.get_levels();
+    const auto temperatures = evaluate_plasma_temperatures(config, x_cm);
+    out.population_for_rates = background_rates.population_for_rates;
+    out.R_full = background_rates.R_full;
 
     // For S evaluation, use local total population = background + recycling-flow states.
     dcr::base::Vector population_for_source = out.population_for_rates;
@@ -199,6 +211,32 @@ LocalSystem assemble_local_system(
     }
 
     return out;
+}
+
+LocalSystem assemble_local_system(
+    const dcr::io::Config& config,
+    const dcr::atomic::AtomicData& atomic_data,
+    const dcr::state::PlasmaState& plasma,
+    const EEDFGridView& grid,
+    const BoundaryPhaseResult& boundary,
+    const dcr::base::Vector& background_population,
+    const dcr::base::Vector& flowA,
+    const dcr::base::Vector& flowM,
+    double x_cm) {
+    const auto background_rates = assemble_background_rate_matrix(
+        config, atomic_data, plasma, grid, background_population, x_cm
+    );
+    return assemble_local_system_from_background_rate_matrix(
+        config,
+        atomic_data,
+        plasma,
+        grid,
+        boundary,
+        background_rates,
+        flowA,
+        flowM,
+        x_cm
+    );
 }
 
 } // namespace dcr::solver

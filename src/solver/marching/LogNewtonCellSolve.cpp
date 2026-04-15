@@ -545,16 +545,19 @@ CellImplicitResult solve_cell_implicit_log_newton(
 
         const dcr::base::Vector bg_iter_full =
             make_background_full(eval.nP_iter, boundary, total_states);
-        const auto local_for_flow = assemble_local_system(
-            config, atomic_data, plasma, grid, boundary, bg_iter_full,
-            eval.flowA_iter, eval.flowM_iter, x_right_cm
+        const auto background_rates = assemble_background_rate_matrix(
+            config, atomic_data, plasma, grid, bg_iter_full, x_right_cm
         );
+        LocalSystem local_for_flow;
+        local_for_flow.population_for_rates = background_rates.population_for_rates;
+        local_for_flow.R_full = background_rates.R_full;
+        local_for_flow.S_background = dcr::base::Vector::Zero(static_cast<int>(boundary.P_indices.size()));
         eval.flow_advanced = advance_recycling_flow_one_step(
             config, atomic_data, boundary, local_for_flow,
             flowA_inflow, flowM_inflow, dx_cm
         );
-        eval.local_for_bg = assemble_local_system(
-            config, atomic_data, plasma, grid, boundary, bg_iter_full,
+        eval.local_for_bg = assemble_local_system_from_background_rate_matrix(
+            config, atomic_data, plasma, grid, boundary, background_rates,
             eval.flow_advanced.flowA_next, eval.flow_advanced.flowM_next, x_right_cm
         );
         eval.bg_solve = solve_background_at_cell_log(
