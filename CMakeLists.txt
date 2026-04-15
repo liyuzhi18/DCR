@@ -12,7 +12,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-option(DCR_ENABLE_OPENMP "Enable OpenMP acceleration" ON)
 
 # =========================================================
 # 2. Dependencies
@@ -58,46 +57,6 @@ endif()
 # --- (C) HDF5 (Output) ---
 find_package(HDF5 REQUIRED COMPONENTS CXX)
 
-# --- (D) Optional OpenMP (kernel-level acceleration only) ---
-set(DCR_OPENMP_ENABLED FALSE)
-if(DCR_ENABLE_OPENMP)
-  find_package(OpenMP QUIET COMPONENTS CXX)
-  if(APPLE AND NOT OpenMP_CXX_FOUND)
-    foreach(_omp_prefix /opt/homebrew/opt/libomp /usr/local/opt/libomp)
-      if(EXISTS "${_omp_prefix}")
-        set(OpenMP_ROOT "${_omp_prefix}")
-        set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp")
-        set(OpenMP_CXX_INCLUDE_DIR "${_omp_prefix}/include")
-        set(OpenMP_CXX_LIB_NAMES "omp")
-        set(OpenMP_omp_LIBRARY "${_omp_prefix}/lib/libomp.dylib")
-        find_package(OpenMP QUIET COMPONENTS CXX)
-        if(OpenMP_CXX_FOUND)
-          break()
-        endif()
-        if(EXISTS "${_omp_prefix}/include/omp.h" AND EXISTS "${_omp_prefix}/lib/libomp.dylib")
-          if(NOT TARGET OpenMP::OpenMP_CXX)
-            add_library(OpenMP::OpenMP_CXX INTERFACE IMPORTED)
-            set_target_properties(OpenMP::OpenMP_CXX PROPERTIES
-              INTERFACE_COMPILE_OPTIONS "-Xpreprocessor;-fopenmp"
-              INTERFACE_INCLUDE_DIRECTORIES "${_omp_prefix}/include"
-              INTERFACE_LINK_LIBRARIES "${_omp_prefix}/lib/libomp.dylib"
-            )
-          endif()
-          set(OpenMP_CXX_FOUND TRUE)
-          break()
-        endif()
-      endif()
-    endforeach()
-  endif()
-
-  if(OpenMP_CXX_FOUND)
-    set(DCR_OPENMP_ENABLED TRUE)
-    message(STATUS "OpenMP enabled for DCR rate-integration kernels")
-  else()
-    message(WARNING "DCR_ENABLE_OPENMP=ON but OpenMP CXX was not found. Building serial kernels.")
-  endif()
-endif()
-
 # =========================================================
 # 3. Modular Libraries
 # =========================================================
@@ -135,10 +94,6 @@ add_library(dcr_atomic
 )
 target_include_directories(dcr_atomic PUBLIC src/atomic src/processes)
 target_link_libraries(dcr_atomic PUBLIC dcr_base dcr_state)
-if(DCR_OPENMP_ENABLED)
-  target_link_libraries(dcr_atomic PUBLIC OpenMP::OpenMP_CXX)
-  target_compile_definitions(dcr_atomic PUBLIC DCR_USE_OPENMP=1)
-endif()
 
 # --- SOLVER ---
 add_library(dcr_solver 
@@ -183,10 +138,6 @@ target_include_directories(dcr_solver PUBLIC src/solver)
 target_include_directories(dcr_solver PRIVATE ${HDF5_INCLUDE_DIRS})
 target_link_libraries(dcr_solver PUBLIC dcr_state dcr_io dcr_physics dcr_atomic ${HDF5_CXX_LIBRARIES})
 target_compile_definitions(dcr_solver PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-if(DCR_OPENMP_ENABLED)
-  target_link_libraries(dcr_solver PUBLIC OpenMP::OpenMP_CXX)
-  target_compile_definitions(dcr_solver PUBLIC DCR_USE_OPENMP=1)
-endif()
 
 # =========================================================
 # 4. Main Executable
@@ -305,17 +256,6 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/tests/inspect_boundary_h_balance.cpp")
     add_executable(inspect_boundary_h_balance tests/inspect_boundary_h_balance.cpp)
     target_compile_definitions(inspect_boundary_h_balance PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     target_link_libraries(inspect_boundary_h_balance PRIVATE dcr_solver)
-endif()
-
-if(DCR_OPENMP_ENABLED)
-    if(TARGET check_atomic_process)
-        target_link_libraries(check_atomic_process PRIVATE OpenMP::OpenMP_CXX)
-        target_compile_definitions(check_atomic_process PRIVATE DCR_USE_OPENMP=1)
-    endif()
-    if(TARGET check_molecular_process)
-        target_link_libraries(check_molecular_process PRIVATE OpenMP::OpenMP_CXX)
-        target_compile_definitions(check_molecular_process PRIVATE DCR_USE_OPENMP=1)
-    endif()
 endif()
 
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/compare_gcr_power_eedf.cpp")

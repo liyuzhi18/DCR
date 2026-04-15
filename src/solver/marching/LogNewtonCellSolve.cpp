@@ -76,18 +76,6 @@ std::string format_elapsed_seconds(double seconds) {
     return out.str();
 }
 
-const char* cell_status_label(CellImplicitStatus status) {
-    switch (status) {
-    case CellImplicitStatus::converged:
-        return "converged";
-    case CellImplicitStatus::stagnated:
-        return "stagnated";
-    case CellImplicitStatus::max_iter:
-    default:
-        return "max-iter";
-    }
-}
-
 double group_sum(const dcr::base::Vector& full,
                  const std::vector<int>& indices) {
     double s = 0.0;
@@ -467,10 +455,7 @@ CellImplicitResult solve_cell_implicit_log_newton(
     double x_right_cm,
     int cell_index,
     bool detailed_log,
-    bool emit_summary_log,
-    const dcr::base::Vector* nP_init_override,
-    const dcr::base::Vector* flowA_init_override,
-    const dcr::base::Vector* flowM_init_override) {
+    bool emit_summary_log) {
 
     CellImplicitResult out;
     const auto solve_timer_start = std::chrono::steady_clock::now();
@@ -480,15 +465,6 @@ CellImplicitResult solve_cell_implicit_log_newton(
     dcr::base::Vector flowM_iter = flowM_old;
     const dcr::base::Vector& flowA_inflow = flowA_old;
     const dcr::base::Vector& flowM_inflow = flowM_old;
-    if (nP_init_override && nP_init_override->size() == nP_old.size()) {
-        nP_iter = nP_init_override->cwiseMax(kLogStateFloor);
-    }
-    if (flowA_init_override && flowA_init_override->size() == flowA_old.size()) {
-        flowA_iter = flowA_init_override->cwiseMax(kLogStateFloor);
-    }
-    if (flowM_init_override && flowM_init_override->size() == flowM_old.size()) {
-        flowM_iter = flowM_init_override->cwiseMax(kLogStateFloor);
-    }
 
     const double marching_tol =
         (config.numerics.marching_tolerance > 0.0)
@@ -596,14 +572,13 @@ CellImplicitResult solve_cell_implicit_log_newton(
 
     auto finalize_output = [&](const dcr::base::Vector& y_final,
                                int iterations,
-                               CellImplicitStatus status,
+                               bool converged,
                                double final_rel,
                                double final_resid_rel) {
         const dcr::base::Vector x_final = project_positive_state(decode_positive_state(y_final));
         unpack_state(x_final, out.nP_new, out.flowA_new, out.flowM_new);
         out.iterations = iterations;
-        out.status = status;
-        out.converged = (status == CellImplicitStatus::converged);
+        out.converged = converged;
         const dcr::base::Vector bg_full =
             make_background_full(out.nP_new, boundary, total_states);
         out.local_final = assemble_local_system(
@@ -637,7 +612,7 @@ CellImplicitResult solve_cell_implicit_log_newton(
                       << " T{e=" << cell_temperatures.electron_eV
                       << ", i=" << cell_temperatures.ion_eV
                       << "}"
-                      << " " << cell_status_label(out.status)
+                      << (out.converged ? " converged" : " max-iter")
                       << " in " << out.iterations
                       << " iterations (rel=" << out.final_rel
                       << ", resid_rel(diag)=" << out.final_resid_rel
@@ -665,13 +640,10 @@ CellImplicitResult solve_cell_implicit_log_newton(
     dcr::base::Vector y_work = encode_positive_state(
         project_positive_state(pack_state(nP_iter, flowA_iter, flowM_iter))
     );
-    CellImplicitStatus final_status = CellImplicitStatus::max_iter;
+    bool converged = false;
     int iterations = max_iter;
     double last_rel = std::numeric_limits<double>::infinity();
     double last_resid_rel = std::numeric_limits<double>::infinity();
-    double previous_state_norm = std::numeric_limits<double>::infinity();
-    int no_progress_count = 0;
-    constexpr double residual_stop_tol = 1.0e-3;
 
     for (int iter = 0; iter < max_iter; ++iter) {
         const auto eval = evaluate_map(y_work);
@@ -708,12 +680,10 @@ CellImplicitResult solve_cell_implicit_log_newton(
                       << "\n";
         }
 
-        if (eval.rel < tol && eval.resid_rel < residual_stop_tol) {
+        if (eval.rel < tol) {
             y_work = eval.y_image;
-            final_status = CellImplicitStatus::converged;
+            converged = true;
             iterations = iter + 1;
-            last_rel = eval.rel;
-            last_resid_rel = eval.resid_rel;
             break;
         }
 
@@ -742,86 +712,54 @@ CellImplicitResult solve_cell_implicit_log_newton(
             config.numerics.marching_nk_max_restarts,
             linear_tol
         );
-        const bool gmres_step_valid =
-            gmres.step.allFinite() && gmres.step.norm() > 0.0;
-        dcr::base::Vector delta = gmres_step_valid
-            ? gmres.step
-            : dcr::base::Vector::Zero(eval.y_projected.size());
+        dcr::base::Vector delta = gmres.step;
+        if (!delta.allFinite() || delta.norm() == 0.0) {
+            tau = std::max(1.0e-6, 0.5 * tau);
+            iterations = iter + 1;
+            y_work = eval.y_projected;
+            if (config.io.verbose_logging && detailed_log) {
+                std::cout << "[DCR_Solver] Marching cell " << cell_index
+                          << ": LOG-NK produced an invalid Newton direction; terminating cell solve"
+                          << " tau=" << tau
+                          << "\n";
+            }
+            break;
+        }
 
         const double norm0 = std::max(1.0e-30, eval.residual.norm());
         double alpha = 1.0;
         bool accepted = false;
         LogMarchingMapEvaluation accepted_eval;
-        bool line_search_failed = false;
-        if (gmres_step_valid) {
-            while (alpha >= alpha_min) {
-                const auto trial = evaluate_map(eval.y_projected + alpha * delta);
-                const double trial_norm = trial.residual.norm();
-                if (trial_norm < norm0 * (1.0 - 1.0e-4 * alpha) ||
-                    trial_norm < 0.95 * norm0) {
-                    accepted_eval = trial;
-                    accepted = true;
-                    break;
-                }
-                alpha *= 0.5;
+        while (alpha >= alpha_min) {
+            const auto trial = evaluate_map(eval.y_projected + alpha * delta);
+            const double trial_norm = trial.residual.norm();
+            if (trial_norm < norm0 * (1.0 - 1.0e-4 * alpha) ||
+                trial_norm < 0.95 * norm0) {
+                accepted_eval = trial;
+                accepted = true;
+                break;
             }
+            alpha *= 0.5;
         }
 
         if (!accepted) {
-            alpha = 0.0;
-            line_search_failed = true;
             tau = std::max(1.0e-6, 0.5 * tau);
+            iterations = iter + 1;
+            y_work = eval.y_projected;
             if (config.io.verbose_logging && detailed_log) {
                 std::cout << "[DCR_Solver] Marching cell " << cell_index
-                          << ": LOG-NK line search failed; retrying with smaller tau"
-                          << " alpha=" << alpha
+                          << ": LOG-NK line search failed; terminating cell solve"
                           << " tau=" << tau
                           << "\n";
             }
+            break;
         } else if (alpha >= 0.75 && gmres.converged) {
             tau = std::min(tau_max, 1.5 * tau);
         } else if (alpha < 0.25 || !gmres.converged) {
             tau = std::max(1.0e-6, 0.5 * tau);
         }
 
-        if (accepted) {
-            y_work = accepted_eval.y_projected;
-            last_rel = accepted_eval.rel;
-            last_resid_rel = accepted_eval.resid_rel;
-        } else {
-            last_rel = eval.rel;
-            last_resid_rel = eval.resid_rel;
-        }
-
-        const double state_norm = accepted
-            ? accepted_eval.residual.norm()
-            : eval.residual.norm();
-        const bool no_progress =
-            std::isfinite(previous_state_norm) &&
-            state_norm >= 0.99 * previous_state_norm;
-        const bool weak_step =
-            line_search_failed || (accepted && alpha <= 2.0 * alpha_min) || !gmres_step_valid;
-        if (tau <= 1.0e-6 && weak_step && no_progress) {
-            ++no_progress_count;
-        } else {
-            no_progress_count = 0;
-        }
-        previous_state_norm = state_norm;
-
-        if (no_progress_count >= 4) {
-            final_status = CellImplicitStatus::stagnated;
-            iterations = iter + 1;
-            if (config.io.verbose_logging && detailed_log) {
-                std::cout << "[DCR_Solver] Marching cell " << cell_index
-                          << ": LOG-NK stagnated"
-                          << " tau=" << tau
-                          << " alpha=" << alpha
-                          << " ||F||=" << state_norm
-                          << "\n";
-            }
-            break;
-        }
-
+        y_work = accepted_eval.y_projected;
         if (config.io.verbose_logging && detailed_log) {
             std::cout << "[DCR_Solver] Marching cell " << cell_index
                       << ": LOG-NK step"
@@ -831,13 +769,9 @@ CellImplicitResult solve_cell_implicit_log_newton(
                       << " tau_next=" << tau
                       << "\n";
         }
-
-        if (iter == max_iter - 1) {
-            iterations = max_iter;
-        }
     }
 
-    finalize_output(y_work, iterations, final_status, last_rel, last_resid_rel);
+    finalize_output(y_work, iterations, converged, last_rel, last_resid_rel);
     return out;
 }
 

@@ -28,11 +28,6 @@ namespace dcr::io {
         std::string atomic_data_root = "";
         std::string data_tables_root = "data_tables";
         bool verbose_logging = true;
-        // Optional marching restart seed. When set to a previous dcr_results.h5,
-        // the full marching solver interpolates background/flow states from that
-        // profile to build better per-cell initial guesses. Default empty keeps
-        // the original behavior.
-        std::string restart_profile_h5 = "";
     };
 
     struct SpeciesConfig {

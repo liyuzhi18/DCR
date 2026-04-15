@@ -19,9 +19,6 @@ CellImplicitResult solve_cell_implicit_log_newton(
     double x_right_cm,
     int cell_index,
     bool detailed_log,
-    bool emit_summary_log,
-    const dcr::base::Vector* nP_init_override = nullptr,
-    const dcr::base::Vector* flowA_init_override = nullptr,
-    const dcr::base::Vector* flowM_init_override = nullptr);
+    bool emit_summary_log);
 
 } // namespace dcr::solver

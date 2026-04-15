@@ -43,7 +43,6 @@ namespace dcr::io {
             config.io.atomic_data_root = io["atomic_data_root"].as<std::string>("");
             config.io.data_tables_root = io["data_tables_root"].as<std::string>("data_tables");
             config.io.verbose_logging = io["verbose_logging"].as<bool>(true);
-            config.io.restart_profile_h5 = io["restart_profile_h5"].as<std::string>("");
         }
 
         // 3. Parse Species List

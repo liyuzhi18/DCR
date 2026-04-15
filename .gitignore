@@ -1,6 +1,7 @@
 .DS_Store
 .vscode/
 build/
+build_omp_on/
 build_omp_asan/
 build-debug/
 output/

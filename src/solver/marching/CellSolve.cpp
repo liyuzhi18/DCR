@@ -85,18 +85,6 @@ std::string format_elapsed_seconds(double seconds) {
     return out.str();
 }
 
-const char* cell_status_label(CellImplicitStatus status) {
-    switch (status) {
-    case CellImplicitStatus::converged:
-        return "converged";
-    case CellImplicitStatus::stagnated:
-        return "stagnated";
-    case CellImplicitStatus::max_iter:
-    default:
-        return "max-iter";
-    }
-}
-
 void enforce_neutral_molecule_floor(
     dcr::base::Vector& nP,
     const dcr::base::Vector& nP_ref,
@@ -575,10 +563,7 @@ CellImplicitResult solve_cell_implicit(
     double x_right_cm,
     int cell_index,
     bool detailed_log,
-    bool emit_summary_log,
-    const dcr::base::Vector* nP_init_override,
-    const dcr::base::Vector* flowA_init_override,
-    const dcr::base::Vector* flowM_init_override) {
+    bool emit_summary_log) {
 
     CellImplicitResult out;
     const auto solve_timer_start = std::chrono::steady_clock::now();
@@ -589,15 +574,6 @@ CellImplicitResult solve_cell_implicit(
     dcr::base::Vector flowM_iter = flowM_old;
     const dcr::base::Vector& flowA_inflow = flowA_old;
     const dcr::base::Vector& flowM_inflow = flowM_old;
-    if (nP_init_override && nP_init_override->size() == nP_old.size()) {
-        nP_iter = *nP_init_override;
-    }
-    if (flowA_init_override && flowA_init_override->size() == flowA_old.size()) {
-        flowA_iter = *flowA_init_override;
-    }
-    if (flowM_init_override && flowM_init_override->size() == flowM_old.size()) {
-        flowM_iter = *flowM_init_override;
-    }
 
     const double marching_tol =
         (config.numerics.marching_tolerance > 0.0)
@@ -764,7 +740,6 @@ CellImplicitResult solve_cell_implicit(
         result.flowM_new = flowM_final;
         result.iterations = iterations;
         result.converged = converged;
-        result.status = converged ? CellImplicitStatus::converged : CellImplicitStatus::max_iter;
         const dcr::base::Vector bg_full =
             make_background_full(result.nP_new, boundary, total_states);
         result.local_final = assemble_local_system(
@@ -810,7 +785,7 @@ CellImplicitResult solve_cell_implicit(
                       << " T{e=" << cell_temperatures.electron_eV
                       << ", i=" << cell_temperatures.ion_eV
                       << "}"
-                      << " " << cell_status_label(result.status)
+                      << (result.converged ? " converged" : " max-iter")
                       << " in " << result.iterations
                       << " iterations (rel=" << final_rel
                       << ", resid_rel(diag)=" << result.final_resid_rel
@@ -845,10 +820,7 @@ CellImplicitResult solve_cell_implicit(
             x_right_cm,
             cell_index,
             detailed_log,
-            emit_summary_log,
-            nP_init_override,
-            flowA_init_override,
-            flowM_init_override
+            emit_summary_log
         );
     }
     const bool use_nk_solver =
@@ -1258,13 +1230,11 @@ CellImplicitResult solve_cell_implicit(
         if (strict_converged) {
             out.iterations = iter + 1;
             out.converged = true;
-            out.status = CellImplicitStatus::converged;
             break;
         }
         if (iter == max_iter - 1) {
             out.iterations = max_iter;
             out.converged = false;
-            out.status = CellImplicitStatus::max_iter;
         }
     }
 

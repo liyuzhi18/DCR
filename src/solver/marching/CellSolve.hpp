@@ -10,12 +10,6 @@
 
 namespace dcr::solver {
 
-enum class CellImplicitStatus {
-    converged,
-    max_iter,
-    stagnated,
-};
-
 // Result container for one implicit cell solve (k -> k+1).
 struct CellImplicitResult {
     dcr::base::Vector nP_new;
@@ -23,7 +17,6 @@ struct CellImplicitResult {
     dcr::base::Vector flowM_new;
     int iterations = 0;
     bool converged = false;
-    CellImplicitStatus status = CellImplicitStatus::max_iter;
     double final_rel = 0.0;
     double final_resid_rel = 0.0;
     double elapsed_seconds = 0.0;
@@ -54,9 +47,6 @@ CellImplicitResult solve_cell_implicit(
     double x_right_cm,
     int cell_index,
     bool detailed_log,
-    bool emit_summary_log,
-    const dcr::base::Vector* nP_init_override = nullptr,
-    const dcr::base::Vector* flowA_init_override = nullptr,
-    const dcr::base::Vector* flowM_init_override = nullptr);
+    bool emit_summary_log);
 
 } // namespace dcr::solver

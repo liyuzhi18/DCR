@@ -3,28 +3,13 @@
 #include "CellSolve.hpp"
 #include "MarchingDiagnostics.hpp"
 
-#include <H5Cpp.h>
-
-#include <algorithm>
-#include <cstdlib>
 #include <cmath>
-#include <functional>
 #include <iostream>
 #include <limits>
-#include <string>
 
 namespace dcr::solver {
 
 namespace {
-
-struct RestartProfileSeed {
-    bool valid = false;
-    std::string path;
-    std::vector<double> x_cm;
-    std::vector<dcr::base::Vector> nP_nodes;
-    std::vector<dcr::base::Vector> flowA_nodes;
-    std::vector<dcr::base::Vector> flowM_nodes;
-};
 
 // Sum_{i=0}^{n-1} first * ratio^i
 double geometric_sum(double first, double ratio, int n_terms) {
@@ -88,19 +73,6 @@ std::vector<double> build_step_sizes_cm(const dcr::io::Config& config) {
     return dx;
 }
 
-int max_index(const dcr::base::Vector& values) {
-    int best = -1;
-    double best_value = -1.0;
-    for (int i = 0; i < values.size(); ++i) {
-        if (!std::isfinite(values(i))) continue;
-        if (values(i) > best_value) {
-            best_value = values(i);
-            best = i;
-        }
-    }
-    return best;
-}
-
 void log_rate_snapshot(double x_cm,
                        const RateDiagnosticSnapshot& snapshot,
                        const std::vector<dcr::atomic::EnergyLevel>& levels) {
@@ -110,169 +82,6 @@ void log_rate_snapshot(double x_cm,
               << " cm SCD=" << snapshot.atomic_effective.scd_cm3_s
               << " ACD=" << snapshot.atomic_effective.acd_cm3_s
               << "\n";
-}
-
-std::vector<double> read_vector_double(H5::H5File& file, const std::string& name) {
-    H5::DataSet ds = file.openDataSet(name);
-    H5::DataSpace space = ds.getSpace();
-    if (space.getSimpleExtentNdims() != 1) {
-        throw std::runtime_error("Expected rank-1 dataset: " + name);
-    }
-    hsize_t dims[1] = {0};
-    space.getSimpleExtentDims(dims, nullptr);
-    std::vector<double> data(static_cast<size_t>(dims[0]), 0.0);
-    if (!data.empty()) ds.read(data.data(), H5::PredType::NATIVE_DOUBLE);
-    return data;
-}
-
-std::vector<int> read_vector_int(H5::H5File& file, const std::string& name) {
-    H5::DataSet ds = file.openDataSet(name);
-    H5::DataSpace space = ds.getSpace();
-    if (space.getSimpleExtentNdims() != 1) {
-        throw std::runtime_error("Expected rank-1 dataset: " + name);
-    }
-    hsize_t dims[1] = {0};
-    space.getSimpleExtentDims(dims, nullptr);
-    std::vector<int> data(static_cast<size_t>(dims[0]), 0);
-    if (!data.empty()) ds.read(data.data(), H5::PredType::NATIVE_INT);
-    return data;
-}
-
-std::vector<dcr::base::Vector> read_matrix_double(H5::H5File& file, const std::string& name) {
-    H5::DataSet ds = file.openDataSet(name);
-    H5::DataSpace space = ds.getSpace();
-    if (space.getSimpleExtentNdims() != 2) {
-        throw std::runtime_error("Expected rank-2 dataset: " + name);
-    }
-    hsize_t dims[2] = {0, 0};
-    space.getSimpleExtentDims(dims, nullptr);
-    const size_t rows = static_cast<size_t>(dims[0]);
-    const size_t cols = static_cast<size_t>(dims[1]);
-    std::vector<double> flat(rows * cols, 0.0);
-    if (!flat.empty()) ds.read(flat.data(), H5::PredType::NATIVE_DOUBLE);
-    std::vector<dcr::base::Vector> out;
-    out.reserve(rows);
-    for (size_t i = 0; i < rows; ++i) {
-        dcr::base::Vector row = dcr::base::Vector::Zero(static_cast<int>(cols));
-        for (size_t j = 0; j < cols; ++j) {
-            row(static_cast<int>(j)) = flat[i * cols + j];
-        }
-        out.push_back(std::move(row));
-    }
-    return out;
-}
-
-bool equal_indices(const std::vector<int>& lhs, const std::vector<int>& rhs) {
-    if (lhs.size() != rhs.size()) return false;
-    for (size_t i = 0; i < lhs.size(); ++i) {
-        if (lhs[i] != rhs[i]) return false;
-    }
-    return true;
-}
-
-RestartProfileSeed load_restart_profile_seed(
-    const dcr::io::Config& config,
-    const BoundaryPhaseResult& boundary,
-    int total_states) {
-
-    RestartProfileSeed out;
-    out.path = config.io.restart_profile_h5;
-    if (out.path.empty()) return out;
-
-    try {
-        H5::H5File file(out.path, H5F_ACC_RDONLY);
-        out.x_cm = read_vector_double(file, "/grid/x_cm");
-        const auto p_indices = read_vector_int(file, "/states/P_indices");
-        const auto a_indices = read_vector_int(file, "/states/A_indices");
-        const auto m_indices = read_vector_int(file, "/states/M_indices");
-        if (!equal_indices(p_indices, boundary.P_indices) ||
-            !equal_indices(a_indices, boundary.A_indices) ||
-            !equal_indices(m_indices, boundary.M_indices)) {
-            throw std::runtime_error("restart profile state block indices do not match current model");
-        }
-
-        const auto bg_full = read_matrix_double(file, "/population/background_full");
-        const auto flowA = read_matrix_double(file, "/population/flowA");
-        const auto flowM = read_matrix_double(file, "/population/flowM");
-
-        if (out.x_cm.empty() ||
-            bg_full.size() != out.x_cm.size() ||
-            flowA.size() != out.x_cm.size() ||
-            flowM.size() != out.x_cm.size()) {
-            throw std::runtime_error("restart profile node counts do not match");
-        }
-
-        out.nP_nodes.reserve(bg_full.size());
-        out.flowA_nodes.reserve(flowA.size());
-        out.flowM_nodes.reserve(flowM.size());
-        for (size_t i = 0; i < bg_full.size(); ++i) {
-            const auto& bg_row = bg_full[i];
-            if (bg_row.size() != total_states) {
-                throw std::runtime_error("restart background_full width does not match total_states");
-            }
-            dcr::base::Vector nP = dcr::base::Vector::Zero(static_cast<int>(boundary.P_indices.size()));
-            for (size_t j = 0; j < boundary.P_indices.size(); ++j) {
-                const int gi = boundary.P_indices[j];
-                if (gi < 0 || gi >= bg_row.size()) continue;
-                nP(static_cast<int>(j)) = std::max(bg_row(gi), 0.0);
-            }
-            out.nP_nodes.push_back(std::move(nP));
-
-            if (flowA[i].size() != static_cast<int>(boundary.A_indices.size()) ||
-                flowM[i].size() != static_cast<int>(boundary.M_indices.size())) {
-                throw std::runtime_error("restart flow block widths do not match current model");
-            }
-            out.flowA_nodes.push_back(flowA[i].cwiseMax(0.0));
-            out.flowM_nodes.push_back(flowM[i].cwiseMax(0.0));
-        }
-
-        out.valid = true;
-        return out;
-    } catch (const H5::Exception& ex) {
-        if (config.io.verbose_logging) {
-            std::cout << "[DCR_Solver] Restart profile disabled: failed to read "
-                      << out.path << " (" << ex.getDetailMsg() << ")\n";
-        }
-        return RestartProfileSeed{};
-    } catch (const std::exception& ex) {
-        if (config.io.verbose_logging) {
-            std::cout << "[DCR_Solver] Restart profile disabled: "
-                      << ex.what() << "\n";
-        }
-        return RestartProfileSeed{};
-    }
-}
-
-dcr::base::Vector interpolate_restart_vector(
-    const std::vector<double>& x_nodes,
-    const std::vector<dcr::base::Vector>& values,
-    double x_target) {
-
-    if (x_nodes.empty() || values.empty()) return {};
-    if (values.size() != x_nodes.size()) return {};
-    if (x_target <= x_nodes.front()) return values.front();
-    if (x_target >= x_nodes.back()) return values.back();
-
-    const auto it = std::upper_bound(x_nodes.begin(), x_nodes.end(), x_target);
-    const size_t i1 = static_cast<size_t>(std::distance(x_nodes.begin(), it));
-    const size_t i0 = i1 - 1;
-    const double x0 = x_nodes[i0];
-    const double x1 = x_nodes[i1];
-    if (!(x1 > x0)) return values[i0];
-    const double alpha = (x_target - x0) / (x1 - x0);
-    return (1.0 - alpha) * values[i0] + alpha * values[i1];
-}
-
-const char* cell_status_reason(CellImplicitStatus status) {
-    switch (status) {
-    case CellImplicitStatus::converged:
-        return "converged";
-    case CellImplicitStatus::stagnated:
-        return "stagnated";
-    case CellImplicitStatus::max_iter:
-    default:
-        return "max_iter";
-    }
 }
 
 } // namespace
@@ -313,14 +122,6 @@ MarchingHistory run_full_marching(
     }
 
     const AtomicRateCalculator rate_calculator(atomic_data);
-    const RestartProfileSeed restart_seed =
-        load_restart_profile_seed(config, boundary, total_states);
-    if (config.io.verbose_logging && restart_seed.valid) {
-        std::cout << "[DCR_Solver] Marching restart seed loaded from "
-                  << restart_seed.path << " with " << restart_seed.x_cm.size()
-                  << " nodes.\n";
-    }
-
     // Initialize compact background state from boundary solution.
     dcr::base::Vector nP = dcr::base::Vector::Zero(Pn);
     for (int i = 0; i < Pn; ++i) {
@@ -377,66 +178,16 @@ MarchingHistory run_full_marching(
         log_rate_snapshot(0.0, history.rate_diagnostics.back(), levels);
     }
 
-    // Optional per-cell debug logging control:
-    // - default detailed iteration log remains cell 1 only.
-    // - set env DCR_DEBUG_CELL=<cell_index> to additionally enable detailed logs
-    //   for a specific marching cell (1-based).
-    int debug_cell = -1;
-    if (const char* env = std::getenv("DCR_DEBUG_CELL")) {
-        debug_cell = std::atoi(env);
-    }
+    // March cell-by-cell.
+    for (size_t k = 0; k < dx.size(); ++k) {
+        const dcr::base::Vector flowA_before = flowA;
+        const dcr::base::Vector flowM_before = flowM;
+        const dcr::base::Vector nP_before = nP;
 
-    auto load_restart_guess = [&](double x_target,
-                                  const dcr::base::Vector& nP_ref,
-                                  const dcr::base::Vector& flowA_ref,
-                                  const dcr::base::Vector& flowM_ref,
-                                  dcr::base::Vector& nP_guess,
-                                  dcr::base::Vector& flowA_guess,
-                                  dcr::base::Vector& flowM_guess,
-                                  const dcr::base::Vector*& nP_ptr,
-                                  const dcr::base::Vector*& flowA_ptr,
-                                  const dcr::base::Vector*& flowM_ptr) {
-        nP_ptr = nullptr;
-        flowA_ptr = nullptr;
-        flowM_ptr = nullptr;
-        if (!restart_seed.valid) return;
-        nP_guess = interpolate_restart_vector(restart_seed.x_cm, restart_seed.nP_nodes, x_target);
-        flowA_guess = interpolate_restart_vector(restart_seed.x_cm, restart_seed.flowA_nodes, x_target);
-        flowM_guess = interpolate_restart_vector(restart_seed.x_cm, restart_seed.flowM_nodes, x_target);
-        if (nP_guess.size() == nP_ref.size()) nP_ptr = &nP_guess;
-        if (flowA_guess.size() == flowA_ref.size()) flowA_ptr = &flowA_guess;
-        if (flowM_guess.size() == flowM_ref.size()) flowM_ptr = &flowM_guess;
-    };
-
-    std::function<CellImplicitResult(
-        const dcr::base::Vector&,
-        const dcr::base::Vector&,
-        const dcr::base::Vector&,
-        double,
-        double,
-        double,
-        int,
-        bool,
-        bool,
-        const dcr::base::Vector*,
-        const dcr::base::Vector*,
-        const dcr::base::Vector*,
-        int)> solve_cell_with_recovery;
-
-    solve_cell_with_recovery =
-        [&](const dcr::base::Vector& nP_left,
-            const dcr::base::Vector& flowA_left,
-            const dcr::base::Vector& flowM_left,
-            double dx_cm,
-            double x_left,
-            double x_right,
-            int cell_index,
-            bool detailed_log_cell,
-            bool emit_summary_log,
-            const dcr::base::Vector* nP_init_ptr,
-            const dcr::base::Vector* flowA_init_ptr,
-            const dcr::base::Vector* flowM_init_ptr,
-            int recovery_depth) -> CellImplicitResult {
+        const int cell_index = static_cast<int>(k + 1);
+        const bool detailed_log_cell = (k == 0);
+        const double x_left = history.x_cm[k];
+        const double x_right = history.x_cm[k + 1];
         CellImplicitResult step = solve_cell_implicit(
             config,
             atomic_data,
@@ -444,164 +195,6 @@ MarchingHistory run_full_marching(
             grid,
             boundary,
             levels,
-            nP_left,
-            flowA_left,
-            flowM_left,
-            dx_cm,
-            x_left,
-            x_right,
-            cell_index,
-            detailed_log_cell,
-            emit_summary_log,
-            nP_init_ptr,
-            flowA_init_ptr,
-            flowM_init_ptr
-        );
-
-        const bool can_recover =
-            (config.numerics.marching_solver == "log_newton_krylov_ptc") &&
-            !step.converged &&
-            recovery_depth > 0 &&
-            (step.status == CellImplicitStatus::stagnated ||
-             step.status == CellImplicitStatus::max_iter);
-        if (!can_recover) {
-            return step;
-        }
-
-        if (config.io.verbose_logging) {
-            std::cout << "[DCR_Solver] Marching cell " << cell_index
-                      << ": entering log-Newton substep recovery"
-                      << " dx=" << dx_cm
-                      << " reason=" << cell_status_reason(step.status)
-                      << " depth=" << recovery_depth
-                      << "\n";
-        }
-
-        const double x_mid = 0.5 * (x_left + x_right);
-        const double dx_half = 0.5 * dx_cm;
-
-        dcr::base::Vector nP_mid_guess;
-        dcr::base::Vector flowA_mid_guess;
-        dcr::base::Vector flowM_mid_guess;
-        const dcr::base::Vector* nP_mid_ptr = nullptr;
-        const dcr::base::Vector* flowA_mid_ptr = nullptr;
-        const dcr::base::Vector* flowM_mid_ptr = nullptr;
-        load_restart_guess(
-            x_mid,
-            nP_left,
-            flowA_left,
-            flowM_left,
-            nP_mid_guess,
-            flowA_mid_guess,
-            flowM_mid_guess,
-            nP_mid_ptr,
-            flowA_mid_ptr,
-            flowM_mid_ptr
-        );
-
-        CellImplicitResult left_step = solve_cell_with_recovery(
-            nP_left,
-            flowA_left,
-            flowM_left,
-            dx_half,
-            x_left,
-            x_mid,
-            cell_index,
-            false,
-            false,
-            nP_mid_ptr,
-            flowA_mid_ptr,
-            flowM_mid_ptr,
-            recovery_depth - 1
-        );
-        if (!left_step.converged) {
-            return step;
-        }
-
-        dcr::base::Vector nP_right_guess;
-        dcr::base::Vector flowA_right_guess;
-        dcr::base::Vector flowM_right_guess;
-        const dcr::base::Vector* nP_right_ptr = nullptr;
-        const dcr::base::Vector* flowA_right_ptr = nullptr;
-        const dcr::base::Vector* flowM_right_ptr = nullptr;
-        load_restart_guess(
-            x_right,
-            left_step.nP_new,
-            left_step.flowA_new,
-            left_step.flowM_new,
-            nP_right_guess,
-            flowA_right_guess,
-            flowM_right_guess,
-            nP_right_ptr,
-            flowA_right_ptr,
-            flowM_right_ptr
-        );
-
-        CellImplicitResult right_step = solve_cell_with_recovery(
-            left_step.nP_new,
-            left_step.flowA_new,
-            left_step.flowM_new,
-            dx_half,
-            x_mid,
-            x_right,
-            cell_index,
-            false,
-            false,
-            nP_right_ptr,
-            flowA_right_ptr,
-            flowM_right_ptr,
-            recovery_depth - 1
-        );
-        if (!right_step.converged) {
-            return step;
-        }
-
-        CellImplicitResult recovered = right_step;
-        recovered.iterations = left_step.iterations + right_step.iterations;
-        recovered.elapsed_seconds = left_step.elapsed_seconds + right_step.elapsed_seconds;
-        recovered.converged = true;
-        recovered.status = CellImplicitStatus::converged;
-
-        if (config.io.verbose_logging) {
-            std::cout << "[DCR_Solver] Marching cell " << cell_index
-                      << ": log-Newton substep recovery succeeded"
-                      << " depth=" << recovery_depth
-                      << " iterations=" << recovered.iterations
-                      << " wall=" << recovered.elapsed_seconds << " s"
-                      << "\n";
-        }
-        return recovered;
-    };
-
-    // March cell-by-cell.
-    for (size_t k = 0; k < dx.size(); ++k) {
-        const dcr::base::Vector flowA_before = flowA;
-        const dcr::base::Vector flowM_before = flowM;
-        const dcr::base::Vector nP_before = nP;
-
-        // Keep full iteration log for the first cell by default, and optionally for
-        // one selected cell via DCR_DEBUG_CELL.
-        const int cell_index = static_cast<int>(k + 1);
-        const bool detailed_log_cell = (k == 0) || (debug_cell > 0 && cell_index == debug_cell);
-        const double x_left = history.x_cm[k];
-        const double x_right = history.x_cm[k + 1];
-        dcr::base::Vector nP_restart;
-        dcr::base::Vector flowA_restart;
-        dcr::base::Vector flowM_restart;
-        const dcr::base::Vector* nP_init_ptr = nullptr;
-        const dcr::base::Vector* flowA_init_ptr = nullptr;
-        const dcr::base::Vector* flowM_init_ptr = nullptr;
-        if (restart_seed.valid) {
-            nP_restart = interpolate_restart_vector(restart_seed.x_cm, restart_seed.nP_nodes, x_right);
-            flowA_restart = interpolate_restart_vector(restart_seed.x_cm, restart_seed.flowA_nodes, x_right);
-            flowM_restart = interpolate_restart_vector(restart_seed.x_cm, restart_seed.flowM_nodes, x_right);
-            if (nP_restart.size() == nP_before.size()) nP_init_ptr = &nP_restart;
-            if (flowA_restart.size() == flowA_before.size()) flowA_init_ptr = &flowA_restart;
-            if (flowM_restart.size() == flowM_before.size()) flowM_init_ptr = &flowM_restart;
-        }
-
-        const int slow_iter_threshold = std::max(1, config.numerics.marching_slow_iter_threshold);
-        CellImplicitResult step = solve_cell_with_recovery(
             nP_before,
             flowA_before,
             flowM_before,
@@ -610,11 +203,7 @@ MarchingHistory run_full_marching(
             x_right,
             cell_index,
             detailed_log_cell,
-            true,
-            nP_init_ptr,
-            flowA_init_ptr,
-            flowM_init_ptr,
-            std::max(0, config.numerics.marching_guess_retries)
+            true
         );
 
         nP = step.nP_new;
@@ -627,19 +216,13 @@ MarchingHistory run_full_marching(
         if (config.io.verbose_logging) {
             if (!step.converged) {
                 std::cout << "[DCR_Solver] Marching cell " << cell_index
-                          << ": failed to converge in a single fixed-dx solve"
-                          << " (status=" << cell_status_reason(step.status) << ").\n";
-            } else if (step.iterations > slow_iter_threshold) {
-                std::cout << "[DCR_Solver] Marching cell " << cell_index
-                          << ": converged, but required more than "
-                          << slow_iter_threshold << " iterations.\n";
+                          << ": failed to converge in a single fixed-dx solve.\n";
             }
         }
         if (!step.converged && config.numerics.abort_on_marching_nonconvergence) {
             throw std::runtime_error(
                 "Marching cell " + std::to_string(cell_index) +
-                " reached marching_max_iterations without convergence (status=" +
-                std::string(cell_status_reason(step.status)) + ")."
+                " reached marching_max_iterations without convergence."
             );
         }
 
@@ -652,24 +235,6 @@ MarchingHistory run_full_marching(
         );
         if (config.io.verbose_logging) {
             log_rate_snapshot(x_right, history.rate_diagnostics.back(), levels);
-        }
-
-        // Preserve the detailed one-step marching dump only when explicitly
-        // requested for cell 1. The unconditional verbose dump makes long runs
-        // look stuck before cell 2 even starts.
-        if (k == 0 && debug_cell == 1) {
-            log_single_step_marching(
-                config,
-                atomic_data,
-                boundary,
-                bg_full,
-                flowA_before,
-                flowM_before,
-                step.local_final,
-                step.flow_final,
-                x_left,
-                x_right
-            );
         }
     }
 
