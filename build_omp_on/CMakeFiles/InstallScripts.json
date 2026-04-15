@@ -1,0 +1,9 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/asimida/Desktop/DCR_code/build_omp_on/cmake_install.cmake",
+		"/Users/asimida/Desktop/DCR_code/build_omp_on/_deps/yaml-cpp-build/cmake_install.cmake",
+		"/Users/asimida/Desktop/DCR_code/build_omp_on/_deps/yaml-cpp-build/util/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

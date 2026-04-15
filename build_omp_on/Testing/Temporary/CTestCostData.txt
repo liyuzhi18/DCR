@@ -1,0 +1,6 @@
+IOCheck 1 0.263723
+AtomicProcessCheck 3 0.0064349
+MolecularProcessCheck 3 0.00283279
+BoundaryPhaseCheck 3 3.218
+HDF5OutputCheck 1 202.612
+---

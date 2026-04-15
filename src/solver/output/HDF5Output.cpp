@@ -13,6 +13,20 @@ namespace dcr::solver {
 
 namespace {
 
+void write_scalar_double(H5::H5File& file, const std::string& name, double value) {
+    const hsize_t dims[1] = {1};
+    H5::DataSpace space(1, dims);
+    H5::DataSet ds = file.createDataSet(name, H5::PredType::NATIVE_DOUBLE, space);
+    ds.write(&value, H5::PredType::NATIVE_DOUBLE);
+}
+
+void write_scalar_int(H5::H5File& file, const std::string& name, int value) {
+    const hsize_t dims[1] = {1};
+    H5::DataSpace space(1, dims);
+    H5::DataSet ds = file.createDataSet(name, H5::PredType::NATIVE_INT, space);
+    ds.write(&value, H5::PredType::NATIVE_INT);
+}
+
 // Write a 1D double dataset.
 void write_vector_double(H5::H5File& file, const std::string& name, const std::vector<double>& data) {
     const hsize_t dims[1] = {static_cast<hsize_t>(data.size())};
@@ -40,6 +54,17 @@ void write_string_vector(H5::H5File& file, const std::string& name, const std::v
     ptrs.reserve(data.size());
     for (const auto& s : data) ptrs.push_back(s.c_str());
     ds.write(ptrs.data(), str_t);
+}
+
+std::vector<std::string> build_level_labels(const std::vector<int>& indices,
+                                            const std::vector<dcr::atomic::EnergyLevel>& levels) {
+    std::vector<std::string> labels;
+    labels.reserve(indices.size());
+    for (int gi : indices) {
+        if (gi >= 0 && gi < static_cast<int>(levels.size())) labels.push_back(levels[static_cast<size_t>(gi)].label);
+        else labels.emplace_back("unknown");
+    }
+    return labels;
 }
 
 // Write a row-major dense matrix represented as vector<state_vector>.
@@ -147,6 +172,15 @@ std::vector<double> collect_atomic_qss_scalar(
     return out;
 }
 
+std::vector<int> collect_atomic_qss_int(
+    const std::vector<RateDiagnosticSnapshot>& snapshots,
+    int AtomicQSSDiagnostics::* member) {
+    std::vector<int> out;
+    out.reserve(snapshots.size());
+    for (const auto& snap : snapshots) out.push_back(snap.atomic_qss.*member);
+    return out;
+}
+
 std::vector<dcr::base::Vector> collect_atomic_qss_vector(
     const std::vector<RateDiagnosticSnapshot>& snapshots,
     dcr::base::Vector AtomicQSSDiagnostics::* member) {
@@ -181,6 +215,7 @@ void write_hdf5_output(
     file.createGroup("/states");
     file.createGroup("/population");
     file.createGroup("/rates");
+    file.createGroup("/timing");
 
     // Grid
     write_vector_double(file, "/grid/x_cm", history.x_cm);
@@ -216,16 +251,40 @@ void write_hdf5_output(
     write_vector_int(file, "/states/P_indices", boundary.P_indices);
     write_vector_int(file, "/states/A_indices", boundary.A_indices);
     write_vector_int(file, "/states/M_indices", boundary.M_indices);
+    if (!history.qss_local_transient_atomic_indices.empty()) {
+        write_vector_int(file, "/states/qss_local_transient_atomic_indices",
+                         history.qss_local_transient_atomic_indices);
+        write_string_vector(file, "/states/qss_local_transient_atomic_labels",
+                            build_level_labels(history.qss_local_transient_atomic_indices, levels));
+    }
+    if (!history.qss_flow_transient_atomic_indices.empty()) {
+        write_vector_int(file, "/states/qss_flow_transient_atomic_indices",
+                         history.qss_flow_transient_atomic_indices);
+        write_string_vector(file, "/states/qss_flow_transient_atomic_labels",
+                            build_level_labels(history.qss_flow_transient_atomic_indices, levels));
+    }
 
     // Populations along x nodes.
     write_matrix(file, "/population/background_full", history.background_full, atomic_data.get_total_states());
     write_matrix(file, "/population/flowA", history.flowA, static_cast<int>(boundary.A_indices.size()));
     write_matrix(file, "/population/flowM", history.flowM, static_cast<int>(boundary.M_indices.size()));
+    write_matrix(file, "/population/qss_local_transient_atomic",
+                 history.qss_local_transient_atomic,
+                 static_cast<int>(history.qss_local_transient_atomic_indices.size()));
+    write_matrix(file, "/population/qss_flow_transient_atomic",
+                 history.qss_flow_transient_atomic,
+                 static_cast<int>(history.qss_flow_transient_atomic_indices.size()));
 
     const auto total_pop = build_total_population(atomic_data, boundary, history);
     write_matrix(file, "/population/total_full", total_pop, atomic_data.get_total_states());
     const auto n_nuclei_cm3 = build_total_nuclei_profile(total_pop, levels);
     write_vector_double(file, "/grid/n_nuclei_cm3", n_nuclei_cm3);
+
+    write_scalar_double(file, "/timing/boundary_elapsed_seconds", history.boundary_elapsed_seconds);
+    write_scalar_int(file, "/timing/boundary_iterations", history.boundary_iterations);
+    write_vector_double(file, "/timing/marching_cell_elapsed_seconds", history.cell_elapsed_seconds);
+    write_vector_int(file, "/timing/marching_cell_iterations", history.cell_iterations);
+    write_vector_int(file, "/timing/marching_cell_converged", history.cell_converged);
 
     // Local rate diagnostics.
     write_vector_double(file, "/rates/Te_eV", collect_rate_scalar(history.rate_diagnostics, &RateDiagnosticSnapshot::electron_temperature_eV));
@@ -237,10 +296,16 @@ void write_hdf5_output(
                         collect_atomic_effective_scalar(history.rate_diagnostics, &AtomicEffectiveRates::acd_cm3_s));
     write_vector_double(file, "/rates/atomic_qss_transport_frequency_s",
                         collect_atomic_qss_scalar(history.rate_diagnostics, &AtomicQSSDiagnostics::transport_frequency_s));
+    write_vector_double(file, "/rates/atomic_qss_first_excited_loss_frequency_s",
+                        collect_atomic_qss_scalar(history.rate_diagnostics, &AtomicQSSDiagnostics::first_excited_local_loss_frequency_s));
+    write_vector_double(file, "/rates/atomic_qss_relaxation_length_cm",
+                        collect_atomic_qss_scalar(history.rate_diagnostics, &AtomicQSSDiagnostics::relaxation_length_cm));
     write_vector_double(file, "/rates/atomic_qss_max_transport_to_local_ratio",
                         collect_atomic_qss_scalar(history.rate_diagnostics, &AtomicQSSDiagnostics::max_transport_to_local_ratio));
     write_vector_double(file, "/rates/atomic_qss_max_transport_to_loss_frequency_ratio",
                         collect_atomic_qss_scalar(history.rate_diagnostics, &AtomicQSSDiagnostics::max_transport_to_loss_frequency_ratio));
+    write_vector_int(file, "/rates/atomic_qss_first_excited_index",
+                     collect_atomic_qss_int(history.rate_diagnostics, &AtomicQSSDiagnostics::first_excited_index));
 
     if (!history.rate_diagnostics.empty()) {
         std::vector<int> excited_indices;
@@ -251,17 +316,9 @@ void write_hdf5_output(
             }
         }
         if (!excited_indices.empty()) {
-            std::vector<std::string> excited_labels;
-            excited_labels.reserve(excited_indices.size());
-            for (int gi : excited_indices) {
-                if (gi >= 0 && gi < static_cast<int>(levels.size())) {
-                    excited_labels.push_back(levels[static_cast<size_t>(gi)].label);
-                } else {
-                    excited_labels.emplace_back("unknown");
-                }
-            }
             write_vector_int(file, "/rates/atomic_excited_indices", excited_indices);
-            write_string_vector(file, "/rates/atomic_excited_labels", excited_labels);
+            write_string_vector(file, "/rates/atomic_excited_labels",
+                                build_level_labels(excited_indices, levels));
             write_matrix(file, "/rates/atomic_excited_transport_rate_cm3_s",
                          collect_atomic_qss_vector(history.rate_diagnostics, &AtomicQSSDiagnostics::transport_rate_cm3_s),
                          static_cast<int>(excited_indices.size()));

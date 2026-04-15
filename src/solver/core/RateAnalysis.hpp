@@ -21,7 +21,10 @@ struct AtomicEffectiveRates {
 struct AtomicQSSDiagnostics {
     bool valid = false;
     std::vector<int> excited_indices;
+    int first_excited_index = -1;
     double transport_frequency_s = 0.0;
+    double first_excited_local_loss_frequency_s = 0.0;
+    double relaxation_length_cm = 0.0;
     dcr::base::Vector transport_rate_cm3_s;
     dcr::base::Vector local_source_rate_cm3_s;
     dcr::base::Vector local_loss_rate_cm3_s;
@@ -58,6 +61,7 @@ private:
     std::vector<int> atomic_global_to_subspace_;
     int atom_ground_index_ = -1;
     int ion_ground_index_ = -1;
+    int first_excited_index_ = -1;
 };
 
 } // namespace dcr::solver

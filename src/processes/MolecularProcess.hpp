@@ -198,7 +198,7 @@ inline TabulatedCrossSection load_cross_section_table(const std::string& path) {
     TabulatedCrossSection table;
     std::ifstream in(path);
     if (!in) {
-        std::cout << "[MolecularVE] Table not found: " << path << "\n";
+        std::cout << "[TabulatedXS] Table not found: " << path << "\n";
         return table;
     }
 
@@ -278,6 +278,7 @@ public:
 private:
     double integrate(const EEDFGridView& grid) const {
         double acc = 0.0;
+        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             const double sigma = table_.sample(E);
@@ -329,6 +330,7 @@ private:
     double integrate(const EEDFGridView& grid) const {
         const double Eth = std::max(1e-6, threshold_ev_);
         double acc = 0.0;
+        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E <= Eth) continue;
@@ -410,6 +412,7 @@ private:
     double integrate(const EEDFGridView& grid) const {
         const double Eth = std::max(1e-6, threshold_ev_);
         double acc = 0.0;
+        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E <= Eth) continue;
@@ -535,6 +538,7 @@ private:
 
     double integrate(const EEDFGridView& grid) const {
         double acc = 0.0;
+        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (!(E > 0.0)) continue;
@@ -596,6 +600,23 @@ public:
 private:
     double integrate(const EEDFGridView& grid) const {
         double acc = 0.0;
+        const bool can_break_early = grid.size() < crm_detail::OMP_PARALLEL_GRID_SIZE_THRESHOLD;
+#ifdef DCR_USE_OPENMP
+        if (!can_break_early) {
+            CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
+            for (size_t i = 0; i < grid.size(); ++i) {
+                const double E = grid.energy(i);
+                if (E > RA_EMAX) continue;
+                if (E <= 0.0) continue;
+                const double sigma = coeff_ * std::sqrt(E) / (ED_EB + E) * 1.0e-18;
+                if (!(sigma > 0.0)) continue;
+                const double val = grid.value_at(i);
+                if (val <= 0.0) continue;
+                acc += sigma * electron_speed(E) * val * grid.weight(i);
+            }
+            return acc;
+        }
+#endif
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E > RA_EMAX) break;
@@ -653,6 +674,7 @@ public:
 private:
     double integrate(const EEDFGridView& grid) const {
         double acc = 0.0;
+        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E <= 0.0) continue;
@@ -679,25 +701,41 @@ public:
                        dcr::base::Index product_a,
                        dcr::base::Index product_b,
                        double threshold_ev,
-                       const std::array<double, 6>& params)
+                       const std::array<double, 6>& params,
+                       std::string mccc_table_path = {},
+                       std::vector<double> reconstructed_rate_fit_coeffs = {})
         : from_(from),
           product_a_(product_a),
           product_b_(product_b),
           threshold_ev_(threshold_ev),
-          params_(params) {}
+          params_(params),
+          mccc_table_path_(std::move(mccc_table_path)),
+          mccc_table_(mccc_table_path_.empty() ? TabulatedCrossSection{} : load_cross_section_table(mccc_table_path_)),
+          reconstructed_rate_fit_coeffs_(std::move(reconstructed_rate_fit_coeffs)) {
+        if (mccc_table_.valid()) {
+            for (double& sigma : mccc_table_.sigmas) {
+                sigma *= BOHR_RADIUS_CM2;
+            }
+        }
+    }
 
     void apply(const dcr::state::PlasmaState& plasma,
                const EEDFGridView& grid,
                const Eigen::VectorXd& population,
                Eigen::MatrixXd& R,
                ReactionAccumulator* accumulator) const override {
-        (void)grid;
         (void)population;
         (void)accumulator;
         if (from_ < 0) return;
         if (product_a_ < 0 || product_b_ < 0) return;
 
-        const double k = rate_coefficient(plasma.electron_temperature_ev());
+        double k = 0.0;
+        if (mccc_table_.valid()) {
+            if (!grid.valid()) return;
+            k = integrate(grid);
+        } else {
+            k = rate_coefficient(plasma.electron_temperature_ev());
+        }
         const double rate = k * plasma.electron_density_cm3();
         if (rate <= 0.0) return;
 
@@ -707,8 +745,34 @@ public:
     }
 
 private:
+    double integrate(const EEDFGridView& grid) const {
+        double acc = 0.0;
+        const double e_min = mccc_table_.energies.front();
+        const double e_max = mccc_table_.energies.back();
+        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
+        for (size_t i = 0; i < grid.size(); ++i) {
+            const double E = grid.energy(i);
+            if (E < e_min) continue;
+            if (E > e_max) continue;
+            const double sigma = mccc_table_.sample(E);
+            if (!(sigma > 0.0)) continue;
+            const double val = grid.value_at(i);
+            if (val <= 0.0) continue;
+            acc += sigma * electron_speed(E) * val * grid.weight(i);
+        }
+        return acc;
+    }
+
     double rate_coefficient(double Te_ev) const {
-        (void)threshold_ev_;
+        if (!reconstructed_rate_fit_coeffs_.empty()) {
+            const double Te = std::max(Te_ev, 1.0e-6);
+            const double logTe = std::log(Te);
+            double poly = 0.0;
+            for (double coeff : reconstructed_rate_fit_coeffs_) {
+                poly = poly * logTe + coeff;
+            }
+            return std::exp(poly - threshold_ev_ / Te);
+        }
         const double Te = std::max(Te_ev / 1000.0 * 11606.0, 1.0);
         const double logTe = std::log(Te);
         const double sum = params_[0] * std::pow(Te, -params_[1])
@@ -722,6 +786,9 @@ private:
     dcr::base::Index product_b_ = -1;
     double threshold_ev_ = 0.0;
     std::array<double, 6> params_{};
+    std::string mccc_table_path_;
+    TabulatedCrossSection mccc_table_;
+    std::vector<double> reconstructed_rate_fit_coeffs_;
 };
 
 // Molecular dissociation (ed) with electron- or ion-driven fits.
@@ -871,6 +938,7 @@ private:
     double integrate_eedf(const EEDFGridView& grid) const {
         if (flag_ != 99 || !grid.valid()) return 0.0;
         double acc = 0.0;
+        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             const double sigma = cross_section(E);
@@ -1083,6 +1151,7 @@ public:
 private:
     double integrate(const EEDFGridView& grid) const {
         double acc = 0.0;
+        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E < threshold_ev_ || E > MIDE_EMAX) continue;

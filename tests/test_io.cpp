@@ -19,6 +19,8 @@ int main() {
     std::cout << "--- Testing ConfigLoader ---\n";
 
     const std::string yaml_full =
+        "solver:\n"
+        "  mode: qss_dcr\n"
         "io:\n"
         "  output_dir: output/test_run\n"
         "  atomic_data_root: atomic_data/\n"
@@ -40,6 +42,11 @@ int main() {
         "  total_density_cm3: 1e14\n"
         "  Te_eV: 5.0\n"
         "  Ti_eV: 2.0\n"
+        "  eedf:\n"
+        "    type: generalized_power\n"
+        "    power_p: 0.9\n"
+        "    hot_fraction: 0.05\n"
+        "    hot_temperature_factor: 2.5\n"
         "  electron_temperature_profile:\n"
         "    type: linear_x\n"
         "    x_start_cm: 0.0\n"
@@ -66,6 +73,7 @@ int main() {
     fs::path full_path = write_temp_config("dcr_test_full.yaml", yaml_full);
     auto cfg = dcr::io::ConfigLoader::load(full_path.string());
 
+    assert(cfg.solver.mode == "qss_dcr");
     assert(cfg.io.output_dir == "output/test_run");
     assert(cfg.io.atomic_data_root == "atomic_data/");
     assert(cfg.io.verbose_logging == false);
@@ -88,6 +96,10 @@ int main() {
     assert(cfg.plasma.total_density == 1e14);
     assert(cfg.plasma.Te_eV == 5.0);
     assert(cfg.plasma.Ti_eV == 2.0);
+    assert(cfg.plasma.eedf.type == "generalized_power");
+    assert(cfg.plasma.eedf.power_p == 0.9);
+    assert(cfg.plasma.eedf.hot_fraction == 0.05);
+    assert(cfg.plasma.eedf.hot_temperature_factor == 2.5);
     assert(cfg.plasma.electron_temperature_profile.enabled == true);
     assert(cfg.plasma.electron_temperature_profile.type == "linear_x");
     assert(cfg.plasma.electron_temperature_profile.x_start_cm == 0.0);
@@ -125,6 +137,7 @@ int main() {
     fs::path defaults_path = write_temp_config("dcr_test_defaults.yaml", yaml_defaults);
     auto cfg_defaults = dcr::io::ConfigLoader::load(defaults_path.string());
 
+    assert(cfg_defaults.solver.mode == "full_dcr");
     assert(cfg_defaults.io.output_dir == "output/defaults");
     assert(cfg_defaults.io.verbose_logging == true);
     assert(cfg_defaults.io.atomic_data_root == "");
@@ -143,6 +156,10 @@ int main() {
 
     assert(cfg_defaults.plasma.electron_temperature_profile.enabled == false);
     assert(cfg_defaults.plasma.ion_temperature_profile.enabled == false);
+    assert(cfg_defaults.plasma.eedf.type == "maxwellian");
+    assert(cfg_defaults.plasma.eedf.power_p == 1.0);
+    assert(cfg_defaults.plasma.eedf.hot_fraction == 0.0);
+    assert(cfg_defaults.plasma.eedf.hot_temperature_factor == 2.5);
     assert(cfg_defaults.plasma.neutral_atom_temperature_eV == 0.1);
     assert(cfg_defaults.plasma.neutral_molecule_temperature_eV == 0.1);
 

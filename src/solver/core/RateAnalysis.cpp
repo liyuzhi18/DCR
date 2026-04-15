@@ -85,6 +85,7 @@ AtomicRateCalculator::AtomicRateCalculator(const dcr::atomic::AtomicData& atomic
 
     double atom_ground_energy = std::numeric_limits<double>::infinity();
     double ion_ground_energy = std::numeric_limits<double>::infinity();
+    double first_excited_energy = std::numeric_limits<double>::infinity();
 
     // Build the atomic-only subspace used for OpenADAS-style effective rates:
     // retain H/H+ states only, then identify the lowest neutral and ion levels
@@ -114,6 +115,10 @@ AtomicRateCalculator::AtomicRateCalculator(const dcr::atomic::AtomicData& atomic
             gi < static_cast<int>(levels_.size()) &&
             is_atomic_neutral_state(levels_[static_cast<size_t>(gi)])) {
             qss_excited_indices_.push_back(gi);
+            if (levels_[static_cast<size_t>(gi)].energy_eV < first_excited_energy) {
+                first_excited_energy = levels_[static_cast<size_t>(gi)].energy_eV;
+                first_excited_index_ = gi;
+            }
         }
     }
 }
@@ -209,6 +214,7 @@ RateDiagnosticSnapshot AtomicRateCalculator::evaluate(
 
     AtomicQSSDiagnostics qss;
     qss.excited_indices = qss_excited_indices_;
+    qss.first_excited_index = first_excited_index_;
     const int n_excited = static_cast<int>(qss.excited_indices.size());
     qss.transport_rate_cm3_s = dcr::base::Vector::Zero(n_excited);
     qss.local_source_rate_cm3_s = dcr::base::Vector::Zero(n_excited);
@@ -259,6 +265,12 @@ RateDiagnosticSnapshot AtomicRateCalculator::evaluate(
             qss.local_source_rate_cm3_s(j) = source_rate;
             qss.local_loss_rate_cm3_s(j) = loss_rate;
             qss.local_loss_frequency_s(j) = loss_frequency;
+            if (gi == first_excited_index_) {
+                qss.first_excited_local_loss_frequency_s = loss_frequency;
+                if (loss_frequency > tiny_rate && boundary.u_A > 0.0) {
+                    qss.relaxation_length_cm = boundary.u_A / loss_frequency;
+                }
+            }
 
             if (n_j > tiny_density) {
                 // Two complementary QSS checks:

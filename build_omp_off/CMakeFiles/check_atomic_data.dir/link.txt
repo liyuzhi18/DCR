@@ -1,0 +1,1 @@
+/usr/bin/c++  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/check_atomic_data.dir/tests/test_atomic_data.cpp.o -o bin/check_atomic_data  libdcr_atomic.a libdcr_state.a

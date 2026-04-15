@@ -1,0 +1,2 @@
+/usr/bin/ar qc libdcr_io.a CMakeFiles/dcr_io.dir/src/io/ConfigLoader.cpp.o CMakeFiles/dcr_io.dir/src/io/DatabaseLoader.cpp.o
+/usr/bin/ranlib libdcr_io.a

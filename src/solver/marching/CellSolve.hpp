@@ -19,6 +19,7 @@ struct CellImplicitResult {
     bool converged = false;
     double final_rel = 0.0;
     double final_resid_rel = 0.0;
+    double elapsed_seconds = 0.0;
     LocalSystem local_final;
     FlowAdvanceResult flow_final;
 };

@@ -53,6 +53,13 @@ class DCRData:
     charge: Optional[np.ndarray] = None
     atomicity: Optional[np.ndarray] = None
     internal_id: Optional[np.ndarray] = None
+    qss_relaxation_length_cm: Optional[np.ndarray] = None
+    qss_first_excited_loss_frequency_s: Optional[np.ndarray] = None
+    qss_first_excited_index: Optional[np.ndarray] = None
+    qss_local_transient_atomic: Optional[np.ndarray] = None
+    qss_flow_transient_atomic: Optional[np.ndarray] = None
+    qss_local_transient_atomic_indices: Optional[np.ndarray] = None
+    qss_flow_transient_atomic_indices: Optional[np.ndarray] = None
 
 
 def configure_journal_style(dpi: int, font_scale: float) -> None:
@@ -124,6 +131,34 @@ def load_hdf5(path: Path) -> DCRData:
         charge = np.asarray(f["/states/charge"][:], dtype=int) if "/states/charge" in f else None
         atomicity = np.asarray(f["/states/atomicity"][:], dtype=int) if "/states/atomicity" in f else None
         internal_id = np.asarray(f["/states/internal_id"][:], dtype=int) if "/states/internal_id" in f else None
+        qss_relaxation_length_cm = (
+            np.asarray(f["/rates/atomic_qss_relaxation_length_cm"][:], dtype=float)
+            if "/rates/atomic_qss_relaxation_length_cm" in f else None
+        )
+        qss_first_excited_loss_frequency_s = (
+            np.asarray(f["/rates/atomic_qss_first_excited_loss_frequency_s"][:], dtype=float)
+            if "/rates/atomic_qss_first_excited_loss_frequency_s" in f else None
+        )
+        qss_first_excited_index = (
+            np.asarray(f["/rates/atomic_qss_first_excited_index"][:], dtype=int)
+            if "/rates/atomic_qss_first_excited_index" in f else None
+        )
+        qss_local_transient_atomic = (
+            np.asarray(f["/population/qss_local_transient_atomic"][:], dtype=float)
+            if "/population/qss_local_transient_atomic" in f else None
+        )
+        qss_flow_transient_atomic = (
+            np.asarray(f["/population/qss_flow_transient_atomic"][:], dtype=float)
+            if "/population/qss_flow_transient_atomic" in f else None
+        )
+        qss_local_transient_atomic_indices = (
+            np.asarray(f["/states/qss_local_transient_atomic_indices"][:], dtype=int)
+            if "/states/qss_local_transient_atomic_indices" in f else None
+        )
+        qss_flow_transient_atomic_indices = (
+            np.asarray(f["/states/qss_flow_transient_atomic_indices"][:], dtype=int)
+            if "/states/qss_flow_transient_atomic_indices" in f else None
+        )
 
     return DCRData(
         x_cm=x_cm,
@@ -138,6 +173,13 @@ def load_hdf5(path: Path) -> DCRData:
         charge=charge,
         atomicity=atomicity,
         internal_id=internal_id,
+        qss_relaxation_length_cm=qss_relaxation_length_cm,
+        qss_first_excited_loss_frequency_s=qss_first_excited_loss_frequency_s,
+        qss_first_excited_index=qss_first_excited_index,
+        qss_local_transient_atomic=qss_local_transient_atomic,
+        qss_flow_transient_atomic=qss_flow_transient_atomic,
+        qss_local_transient_atomic_indices=qss_local_transient_atomic_indices,
+        qss_flow_transient_atomic_indices=qss_flow_transient_atomic_indices,
     )
 
 

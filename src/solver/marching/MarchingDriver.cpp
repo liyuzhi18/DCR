@@ -3,15 +3,27 @@
 #include "CellSolve.hpp"
 #include "MarchingDiagnostics.hpp"
 
+#include <H5Cpp.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <string>
 
 namespace dcr::solver {
 
 namespace {
+
+struct RestartProfileSeed {
+    bool valid = false;
+    std::string path;
+    std::vector<double> x_cm;
+    std::vector<dcr::base::Vector> nP_nodes;
+    std::vector<dcr::base::Vector> flowA_nodes;
+    std::vector<dcr::base::Vector> flowM_nodes;
+};
 
 // Sum_{i=0}^{n-1} first * ratio^i
 double geometric_sum(double first, double ratio, int n_terms) {
@@ -91,61 +103,163 @@ int max_index(const dcr::base::Vector& values) {
 void log_rate_snapshot(double x_cm,
                        const RateDiagnosticSnapshot& snapshot,
                        const std::vector<dcr::atomic::EnergyLevel>& levels) {
-    if (!snapshot.atomic_effective.valid && !snapshot.atomic_qss.valid) return;
-
-    std::cout << "[DCR_Solver][Rates][plasma] x=" << x_cm
-              << " cm Te=" << snapshot.electron_temperature_eV
-              << " Ti=" << snapshot.ion_temperature_eV
-              << " ne=" << snapshot.electron_density_cm3
+    (void)levels;
+    if (!snapshot.atomic_effective.valid) return;
+    std::cout << "[DCR_Solver][Rates][atomic] x=" << x_cm
+              << " cm SCD=" << snapshot.atomic_effective.scd_cm3_s
+              << " ACD=" << snapshot.atomic_effective.acd_cm3_s
               << "\n";
+}
 
-    if (snapshot.atomic_effective.valid) {
-        std::cout << "[DCR_Solver][Rates][atomic] x=" << x_cm
-                  << " cm SCD=" << snapshot.atomic_effective.scd_cm3_s
-                  << " ACD=" << snapshot.atomic_effective.acd_cm3_s
-                  << "\n";
+std::vector<double> read_vector_double(H5::H5File& file, const std::string& name) {
+    H5::DataSet ds = file.openDataSet(name);
+    H5::DataSpace space = ds.getSpace();
+    if (space.getSimpleExtentNdims() != 1) {
+        throw std::runtime_error("Expected rank-1 dataset: " + name);
     }
+    hsize_t dims[1] = {0};
+    space.getSimpleExtentDims(dims, nullptr);
+    std::vector<double> data(static_cast<size_t>(dims[0]), 0.0);
+    if (!data.empty()) ds.read(data.data(), H5::PredType::NATIVE_DOUBLE);
+    return data;
+}
 
-    if (!snapshot.atomic_qss.valid) return;
-
-    std::cout << "[DCR_Solver][Rates][qss] x=" << x_cm
-              << " cm transport_frequency=" << snapshot.atomic_qss.transport_frequency_s
-              << " max_transport_to_local=" << snapshot.atomic_qss.max_transport_to_local_ratio
-              << " max_transport_to_lossfreq=" << snapshot.atomic_qss.max_transport_to_loss_frequency_ratio
-              << "\n";
-
-    const int worst_local = max_index(snapshot.atomic_qss.transport_to_local_ratio);
-    if (worst_local >= 0 &&
-        worst_local < static_cast<int>(snapshot.atomic_qss.excited_indices.size())) {
-        const int gi = snapshot.atomic_qss.excited_indices[static_cast<size_t>(worst_local)];
-        const std::string label =
-            (gi >= 0 && gi < static_cast<int>(levels.size())) ? levels[static_cast<size_t>(gi)].label : "unknown";
-        std::cout << "[DCR_Solver][Rates][qss_state] x=" << x_cm
-                  << " cm metric=transport_to_local"
-                  << " state=" << gi
-                  << " label=\"" << label << "\""
-                  << " transport=" << snapshot.atomic_qss.transport_rate_cm3_s(worst_local)
-                  << " source=" << snapshot.atomic_qss.local_source_rate_cm3_s(worst_local)
-                  << " loss=" << snapshot.atomic_qss.local_loss_rate_cm3_s(worst_local)
-                  << " ratio=" << snapshot.atomic_qss.transport_to_local_ratio(worst_local)
-                  << "\n";
+std::vector<int> read_vector_int(H5::H5File& file, const std::string& name) {
+    H5::DataSet ds = file.openDataSet(name);
+    H5::DataSpace space = ds.getSpace();
+    if (space.getSimpleExtentNdims() != 1) {
+        throw std::runtime_error("Expected rank-1 dataset: " + name);
     }
+    hsize_t dims[1] = {0};
+    space.getSimpleExtentDims(dims, nullptr);
+    std::vector<int> data(static_cast<size_t>(dims[0]), 0);
+    if (!data.empty()) ds.read(data.data(), H5::PredType::NATIVE_INT);
+    return data;
+}
 
-    const int worst_lossfreq = max_index(snapshot.atomic_qss.transport_to_loss_frequency_ratio);
-    if (worst_lossfreq >= 0 &&
-        worst_lossfreq < static_cast<int>(snapshot.atomic_qss.excited_indices.size())) {
-        const int gi = snapshot.atomic_qss.excited_indices[static_cast<size_t>(worst_lossfreq)];
-        const std::string label =
-            (gi >= 0 && gi < static_cast<int>(levels.size())) ? levels[static_cast<size_t>(gi)].label : "unknown";
-        std::cout << "[DCR_Solver][Rates][qss_state] x=" << x_cm
-                  << " cm metric=transport_to_lossfreq"
-                  << " state=" << gi
-                  << " label=\"" << label << "\""
-                  << " transport_frequency=" << snapshot.atomic_qss.transport_frequency_s
-                  << " loss_frequency=" << snapshot.atomic_qss.local_loss_frequency_s(worst_lossfreq)
-                  << " ratio=" << snapshot.atomic_qss.transport_to_loss_frequency_ratio(worst_lossfreq)
-                  << "\n";
+std::vector<dcr::base::Vector> read_matrix_double(H5::H5File& file, const std::string& name) {
+    H5::DataSet ds = file.openDataSet(name);
+    H5::DataSpace space = ds.getSpace();
+    if (space.getSimpleExtentNdims() != 2) {
+        throw std::runtime_error("Expected rank-2 dataset: " + name);
     }
+    hsize_t dims[2] = {0, 0};
+    space.getSimpleExtentDims(dims, nullptr);
+    const size_t rows = static_cast<size_t>(dims[0]);
+    const size_t cols = static_cast<size_t>(dims[1]);
+    std::vector<double> flat(rows * cols, 0.0);
+    if (!flat.empty()) ds.read(flat.data(), H5::PredType::NATIVE_DOUBLE);
+    std::vector<dcr::base::Vector> out;
+    out.reserve(rows);
+    for (size_t i = 0; i < rows; ++i) {
+        dcr::base::Vector row = dcr::base::Vector::Zero(static_cast<int>(cols));
+        for (size_t j = 0; j < cols; ++j) {
+            row(static_cast<int>(j)) = flat[i * cols + j];
+        }
+        out.push_back(std::move(row));
+    }
+    return out;
+}
+
+bool equal_indices(const std::vector<int>& lhs, const std::vector<int>& rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+        if (lhs[i] != rhs[i]) return false;
+    }
+    return true;
+}
+
+RestartProfileSeed load_restart_profile_seed(
+    const dcr::io::Config& config,
+    const BoundaryPhaseResult& boundary,
+    int total_states) {
+
+    RestartProfileSeed out;
+    out.path = config.io.restart_profile_h5;
+    if (out.path.empty()) return out;
+
+    try {
+        H5::H5File file(out.path, H5F_ACC_RDONLY);
+        out.x_cm = read_vector_double(file, "/grid/x_cm");
+        const auto p_indices = read_vector_int(file, "/states/P_indices");
+        const auto a_indices = read_vector_int(file, "/states/A_indices");
+        const auto m_indices = read_vector_int(file, "/states/M_indices");
+        if (!equal_indices(p_indices, boundary.P_indices) ||
+            !equal_indices(a_indices, boundary.A_indices) ||
+            !equal_indices(m_indices, boundary.M_indices)) {
+            throw std::runtime_error("restart profile state block indices do not match current model");
+        }
+
+        const auto bg_full = read_matrix_double(file, "/population/background_full");
+        const auto flowA = read_matrix_double(file, "/population/flowA");
+        const auto flowM = read_matrix_double(file, "/population/flowM");
+
+        if (out.x_cm.empty() ||
+            bg_full.size() != out.x_cm.size() ||
+            flowA.size() != out.x_cm.size() ||
+            flowM.size() != out.x_cm.size()) {
+            throw std::runtime_error("restart profile node counts do not match");
+        }
+
+        out.nP_nodes.reserve(bg_full.size());
+        out.flowA_nodes.reserve(flowA.size());
+        out.flowM_nodes.reserve(flowM.size());
+        for (size_t i = 0; i < bg_full.size(); ++i) {
+            const auto& bg_row = bg_full[i];
+            if (bg_row.size() != total_states) {
+                throw std::runtime_error("restart background_full width does not match total_states");
+            }
+            dcr::base::Vector nP = dcr::base::Vector::Zero(static_cast<int>(boundary.P_indices.size()));
+            for (size_t j = 0; j < boundary.P_indices.size(); ++j) {
+                const int gi = boundary.P_indices[j];
+                if (gi < 0 || gi >= bg_row.size()) continue;
+                nP(static_cast<int>(j)) = std::max(bg_row(gi), 0.0);
+            }
+            out.nP_nodes.push_back(std::move(nP));
+
+            if (flowA[i].size() != static_cast<int>(boundary.A_indices.size()) ||
+                flowM[i].size() != static_cast<int>(boundary.M_indices.size())) {
+                throw std::runtime_error("restart flow block widths do not match current model");
+            }
+            out.flowA_nodes.push_back(flowA[i].cwiseMax(0.0));
+            out.flowM_nodes.push_back(flowM[i].cwiseMax(0.0));
+        }
+
+        out.valid = true;
+        return out;
+    } catch (const H5::Exception& ex) {
+        if (config.io.verbose_logging) {
+            std::cout << "[DCR_Solver] Restart profile disabled: failed to read "
+                      << out.path << " (" << ex.getDetailMsg() << ")\n";
+        }
+        return RestartProfileSeed{};
+    } catch (const std::exception& ex) {
+        if (config.io.verbose_logging) {
+            std::cout << "[DCR_Solver] Restart profile disabled: "
+                      << ex.what() << "\n";
+        }
+        return RestartProfileSeed{};
+    }
+}
+
+dcr::base::Vector interpolate_restart_vector(
+    const std::vector<double>& x_nodes,
+    const std::vector<dcr::base::Vector>& values,
+    double x_target) {
+
+    if (x_nodes.empty() || values.empty()) return {};
+    if (values.size() != x_nodes.size()) return {};
+    if (x_target <= x_nodes.front()) return values.front();
+    if (x_target >= x_nodes.back()) return values.back();
+
+    const auto it = std::upper_bound(x_nodes.begin(), x_nodes.end(), x_target);
+    const size_t i1 = static_cast<size_t>(std::distance(x_nodes.begin(), it));
+    const size_t i0 = i1 - 1;
+    const double x0 = x_nodes[i0];
+    const double x1 = x_nodes[i1];
+    if (!(x1 > x0)) return values[i0];
+    const double alpha = (x_target - x0) / (x1 - x0);
+    return (1.0 - alpha) * values[i0] + alpha * values[i1];
 }
 
 } // namespace
@@ -163,6 +277,8 @@ MarchingHistory run_full_marching(
     const auto dx = build_step_sizes_cm(config);
     const int n_nodes = static_cast<int>(dx.size()) + 1;
     if (n_nodes <= 0) return history;
+    history.boundary_elapsed_seconds = boundary.elapsed_seconds;
+    history.boundary_iterations = boundary.iterations;
 
     history.x_cm.assign(static_cast<size_t>(n_nodes), 0.0);
     for (int i = 1; i < n_nodes; ++i) {
@@ -184,6 +300,13 @@ MarchingHistory run_full_marching(
     }
 
     const AtomicRateCalculator rate_calculator(atomic_data);
+    const RestartProfileSeed restart_seed =
+        load_restart_profile_seed(config, boundary, total_states);
+    if (config.io.verbose_logging && restart_seed.valid) {
+        std::cout << "[DCR_Solver] Marching restart seed loaded from "
+                  << restart_seed.path << " with " << restart_seed.x_cm.size()
+                  << " nodes.\n";
+    }
 
     // Initialize compact background state from boundary solution.
     dcr::base::Vector nP = dcr::base::Vector::Zero(Pn);
@@ -223,6 +346,9 @@ MarchingHistory run_full_marching(
     history.flowA.reserve(static_cast<size_t>(n_nodes));
     history.flowM.reserve(static_cast<size_t>(n_nodes));
     history.rate_diagnostics.reserve(static_cast<size_t>(n_nodes));
+    history.cell_elapsed_seconds.reserve(dx.size());
+    history.cell_iterations.reserve(dx.size());
+    history.cell_converged.reserve(dx.size());
 
     const dcr::base::Vector bg_full_boundary = make_background_full(nP, boundary, total_states);
     history.background_full.push_back(bg_full_boundary);
@@ -259,88 +385,65 @@ MarchingHistory run_full_marching(
         const bool detailed_log_cell = (k == 0) || (debug_cell > 0 && cell_index == debug_cell);
         const double x_left = history.x_cm[k];
         const double x_right = history.x_cm[k + 1];
-
-        // Retry strategy at fixed dx:
-        // - If a cell is slow (iterations > threshold) or fails, retry with
-        //   an alternative initial guess (no local dx reduction).
-        const int slow_iter_threshold = std::max(1, config.numerics.marching_slow_iter_threshold);
-        const int max_guess_retries = std::max(1, config.numerics.marching_guess_retries);
-        bool accepted = false;
-        CellImplicitResult step;
-        for (int retry = 0; retry < max_guess_retries && !accepted; ++retry) {
-            // Retry seeds:
-            // 1) current-cell initial guess
-            // 2) marching initial (boundary) guess
-            // 3) midpoint of (1) and (2)
-            dcr::base::Vector nP_seed = nP_before;
-            dcr::base::Vector flowA_seed = flowA_before;
-            dcr::base::Vector flowM_seed = flowM_before;
-            if (retry == 1) {
-                nP_seed = nP_initial;
-                flowA_seed = flowA_initial;
-                flowM_seed = flowM_initial;
-            } else if (retry == 2) {
-                nP_seed = 0.5 * (nP_before + nP_initial);
-                flowA_seed = 0.5 * (flowA_before + flowA_initial);
-                flowM_seed = 0.5 * (flowM_before + flowM_initial);
-            }
-
-            step = solve_cell_implicit(
-                config,
-                atomic_data,
-                plasma,
-                grid,
-                boundary,
-                levels,
-                nP_before,
-                flowA_before,
-                flowM_before,
-                dx[k],
-                x_left,
-                x_right,
-                cell_index,
-                detailed_log_cell,
-                true,
-                &nP_seed,
-                &flowA_seed,
-                &flowM_seed
-            );
-
-            if (step.converged && step.iterations <= slow_iter_threshold) {
-                accepted = true;
-                nP = step.nP_new;
-                flowA = step.flowA_new;
-                flowM = step.flowM_new;
-                break;
-            }
-
-            if (retry + 1 < max_guess_retries) {
-                if (config.io.verbose_logging) {
-                    std::cout << "[DCR_Solver] Marching cell " << cell_index
-                              << ": retrying with alternative initial guess (attempt "
-                              << (retry + 2) << "/" << max_guess_retries
-                              << ", previous iters=" << step.iterations
-                              << ", converged=" << (step.converged ? "yes" : "no")
-                              << ").\n";
-                }
-            } else if (step.converged) {
-                // Accept final retry even if iteration count is still high.
-                accepted = true;
-                nP = step.nP_new;
-                flowA = step.flowA_new;
-                flowM = step.flowM_new;
-            }
+        dcr::base::Vector nP_restart;
+        dcr::base::Vector flowA_restart;
+        dcr::base::Vector flowM_restart;
+        const dcr::base::Vector* nP_init_ptr = nullptr;
+        const dcr::base::Vector* flowA_init_ptr = nullptr;
+        const dcr::base::Vector* flowM_init_ptr = nullptr;
+        if (restart_seed.valid) {
+            nP_restart = interpolate_restart_vector(restart_seed.x_cm, restart_seed.nP_nodes, x_right);
+            flowA_restart = interpolate_restart_vector(restart_seed.x_cm, restart_seed.flowA_nodes, x_right);
+            flowM_restart = interpolate_restart_vector(restart_seed.x_cm, restart_seed.flowM_nodes, x_right);
+            if (nP_restart.size() == nP_before.size()) nP_init_ptr = &nP_restart;
+            if (flowA_restart.size() == flowA_before.size()) flowA_init_ptr = &flowA_restart;
+            if (flowM_restart.size() == flowM_before.size()) flowM_init_ptr = &flowM_restart;
         }
 
-        if (!accepted) {
-            // Keep last iterate and proceed, while making the failure explicit in logs.
-            nP = step.nP_new;
-            flowA = step.flowA_new;
-            flowM = step.flowM_new;
-            if (config.io.verbose_logging) {
+        const int slow_iter_threshold = std::max(1, config.numerics.marching_slow_iter_threshold);
+        CellImplicitResult step = solve_cell_implicit(
+            config,
+            atomic_data,
+            plasma,
+            grid,
+            boundary,
+            levels,
+            nP_before,
+            flowA_before,
+            flowM_before,
+            dx[k],
+            x_left,
+            x_right,
+            cell_index,
+            detailed_log_cell,
+            true,
+            nP_init_ptr,
+            flowA_init_ptr,
+            flowM_init_ptr
+        );
+
+        nP = step.nP_new;
+        flowA = step.flowA_new;
+        flowM = step.flowM_new;
+        history.cell_elapsed_seconds.push_back(step.elapsed_seconds);
+        history.cell_iterations.push_back(step.iterations);
+        history.cell_converged.push_back(step.converged ? 1 : 0);
+
+        if (config.io.verbose_logging) {
+            if (!step.converged) {
                 std::cout << "[DCR_Solver] Marching cell " << cell_index
-                          << ": failed to converge after fixed-dx retries.\n";
+                          << ": failed to converge in a single fixed-dx solve.\n";
+            } else if (step.iterations > slow_iter_threshold) {
+                std::cout << "[DCR_Solver] Marching cell " << cell_index
+                          << ": converged, but required more than "
+                          << slow_iter_threshold << " iterations.\n";
             }
+        }
+        if (!step.converged && config.numerics.abort_on_marching_nonconvergence) {
+            throw std::runtime_error(
+                "Marching cell " + std::to_string(cell_index) +
+                " reached marching_max_iterations without convergence."
+            );
         }
 
         const dcr::base::Vector bg_full = make_background_full(nP, boundary, total_states);
@@ -354,8 +457,10 @@ MarchingHistory run_full_marching(
             log_rate_snapshot(x_right, history.rate_diagnostics.back(), levels);
         }
 
-        // Preserve detailed first-cell diagnostics for model verification.
-        if (k == 0) {
+        // Preserve the detailed one-step marching dump only when explicitly
+        // requested for cell 1. The unconditional verbose dump makes long runs
+        // look stuck before cell 2 even starts.
+        if (k == 0 && debug_cell == 1) {
             log_single_step_marching(
                 config,
                 atomic_data,

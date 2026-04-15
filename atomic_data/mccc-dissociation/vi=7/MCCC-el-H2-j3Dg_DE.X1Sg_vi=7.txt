@@ -1,0 +1,45 @@
+# MCCC calculations of electron scattering on molecular hydrogen and isotopologues
+# Adiabatic nuclei calculations performed with the spheroidal MCCC(210) model
+# Reference: Scarlett et al., Atom. Data Nucl. Data Tables (2021)
+# MCCC Database: mccc-db.org
+# This file: e + H2(X1Sg,vi=7) -> e + H2(j3Dg) (dissociative excitation)
+# Initial-state energy: -1.05384 Hartrees
+#
+# Threshold: 1.35590E+01 eV
+#
+# Energy (eV)   CS (a_0^2)
+  1.35590E+01   0.00000E+00
+  1.40000E+01   1.02708E-04
+  1.45000E+01   3.72149E-04
+  1.50000E+01   9.11190E-04
+  1.55000E+01   1.20445E-03
+  1.60000E+01   2.24131E-03
+  1.65000E+01   3.22265E-03
+  1.70000E+01   3.31462E-03
+  1.75000E+01   3.60352E-03
+  1.80000E+01   3.69991E-03
+  1.85000E+01   4.04443E-03
+  1.90000E+01   3.97386E-03
+  1.95000E+01   3.86427E-03
+  2.00000E+01   3.72618E-03
+  2.10000E+01   3.43883E-03
+  2.20000E+01   3.15158E-03
+  2.30000E+01   2.87996E-03
+  2.40000E+01   2.63210E-03
+  2.50000E+01   2.41077E-03
+  2.60000E+01   2.20779E-03
+  2.70000E+01   2.02397E-03
+  2.80000E+01   1.85821E-03
+  2.90000E+01   1.70895E-03
+  3.00000E+01   1.57456E-03
+  3.50000E+01   1.07472E-03
+  4.00000E+01   7.65220E-04
+  4.50000E+01   5.63935E-04
+  5.00000E+01   4.27592E-04
+  6.00000E+01   2.63054E-04
+  7.00000E+01   1.73477E-04
+  8.00000E+01   1.20546E-04
+  9.00000E+01   8.72464E-05
+  1.00000E+02   6.52350E-05
+  1.25000E+02   3.50973E-05
+  1.50000E+02   2.10759E-05

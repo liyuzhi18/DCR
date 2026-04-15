@@ -5,6 +5,7 @@
 #include "../../physics/EEDF.hpp"
 #include "../../physics/WallBoundary.hpp"
 #include "../../state/PlasmaState.hpp"
+#include <limits>
 #include <vector>
 
 namespace dcr::solver {
@@ -35,6 +36,12 @@ struct BoundaryPhaseResult {
 
     double atom_mass_amu = 1.0;
     double molecule_mass_amu = 2.0;
+
+    bool converged = false;
+    int iterations = 0;
+    double final_rel_change = std::numeric_limits<double>::infinity();
+    double final_residual_rel = std::numeric_limits<double>::infinity();
+    double elapsed_seconds = 0.0;
 };
 
 BoundaryPhaseResult run_boundary_phase(

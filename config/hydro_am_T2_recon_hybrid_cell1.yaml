@@ -1,0 +1,50 @@
+io:
+  output_dir: output/test_run_T2eV_recon_hybrid_cell1
+  atomic_data_root: atomic_data/
+  data_tables_root: data_tables/
+  verbose_logging: true
+species:
+- name: H_Atom
+  filename: sclit.01
+  is_molecule: false
+- name: H2_Molecule
+  filename: sclit_M.01
+  is_molecule: true
+grid:
+  length_cm: 0.001
+  num_cells: 2
+  type: log
+  first_cell_cm: 0.001
+  poloidal_width_cm: 1.0
+plasma:
+  total_density_cm3: 1e14
+  Te_eV: 2.0
+  Ti_eV: 2.0
+  neutral_atom_temperature_eV: 0.1
+  neutral_molecule_temperature_eV: 0.1
+  initial_conditions:
+  - index: 0
+    fraction: 0.2
+  - index: 1
+    fraction: 0.6
+  - index: 31
+    fraction: 0.1
+wall:
+  material: W
+  sheath_potential_drop: 4.0
+  temperature_eV: 0.1
+numerics:
+  tolerance: 1.0e-06
+  max_iterations: 5000
+  relaxation: 0.2
+  marching_slow_iter_threshold: 100
+  use_mccc_h2_dissociation: false
+  boundary_solver: picard
+  marching_solver: newton_krylov_ptc
+  marching_ptc_tau_init: 0.05
+  marching_ptc_tau_max: 200.0
+  marching_nk_krylov_dim: 10
+  marching_nk_max_restarts: 2
+  marching_nk_fd_eps: 1.0e-06
+  marching_nk_alpha_min: 1.0e-04
+  marching_h2_floor_fraction: 0.1

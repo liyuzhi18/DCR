@@ -82,6 +82,7 @@ private:
         const double Eth = std::max({1e-6, threshold_ev_, fallback_gap});
         if (oscillator_strength_ <= 0.0) return 0.0;
         double acc = 0.0;
+        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E <= Eth) continue;
@@ -100,6 +101,7 @@ private:
         const double fallback_gap = std::max(0.0, e_to_ev_ - e_from_ev_);
         const double Eth = std::max({1e-6, threshold_ev_, fallback_gap});
         double acc = 0.0;
+        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E < 0.0) continue;
@@ -226,6 +228,7 @@ private:
     double integrate_rr(const EEDFGridView& grid) const {
         const double Eth = std::max(1e-6, threshold_ev_);
         double acc = 0.0;
+        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E < 0.0) continue;
@@ -329,9 +332,12 @@ public:
     }
 
 private:
+    using SecondaryFractionGrid = std::array<std::pair<double, double>, 159>;
+
     double integrate_eii(const EEDFGridView& grid) const {
         const double Eth = std::max(1e-6, threshold_ev_);
         double acc = 0.0;
+        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E <= Eth) continue;
@@ -347,13 +353,14 @@ private:
     double integrate_tbr(const EEDFGridView& grid) const {
         if (g_lower_ <= 0.0 || g_upper_ <= 0.0) return 0.0;
         const double Eth = std::max(1e-6, threshold_ev_);
+        const auto& secondary_grid = get_secondary_fraction_grid();
         double acc = 0.0;
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E <= Eth) continue;
             const double sigma = ionization_cross_section(E / Eth);
             if (sigma <= 0.0) continue;
-            const double conv = pair_convolution(E - Eth, grid);
+            const double conv = pair_convolution(E - Eth, grid, secondary_grid);
             if (conv <= 0.0) continue;
             acc += sigma * electron_speed(E) * std::sqrt(E) * conv * grid.weight(i);
         }
@@ -382,13 +389,15 @@ private:
         return CI3BI * std::log(X) / X / (1.0 + params_[2] / (X * X) + params_[3] / X);
     }
 
-    double pair_convolution(double excess_energy, const EEDFGridView& grid) const {
+    double pair_convolution(double excess_energy,
+                            const EEDFGridView& grid,
+                            const SecondaryFractionGrid& secondary_grid) const {
         if (excess_energy <= 0.0) return 0.0;
-        const auto& secondary_grid = get_secondary_fraction_grid();
         double sum = 0.0;
-        for (const auto& node : secondary_grid) {
-            const double frac = node.first;
-            const double dfrac = node.second;
+        CRM_DETAIL_OMP_SIMD_FOR_SUM
+        for (int idx = 0; idx < static_cast<int>(secondary_grid.size()); ++idx) {
+            const double frac = secondary_grid[static_cast<size_t>(idx)].first;
+            const double dfrac = secondary_grid[static_cast<size_t>(idx)].second;
             const double e2 = frac * excess_energy;
             const double e3 = excess_energy - e2;
             if (e3 < 0.0) continue;
@@ -400,15 +409,15 @@ private:
         return 2.0 * sum;
     }
 
-    static const std::vector<std::pair<double, double>>& get_secondary_fraction_grid() {
-        static std::vector<std::pair<double, double>> grid;
-        if (grid.empty()) {
-            grid.reserve(159);
+    static const SecondaryFractionGrid& get_secondary_fraction_grid() {
+        static const SecondaryFractionGrid grid = [] {
+            SecondaryFractionGrid values{};
             double frac = 0.0;
+            size_t idx = 0;
 
             auto push_point = [&](double df) {
                 frac += df;
-                grid.emplace_back(frac, df);
+                values[idx++] = std::make_pair(frac, df);
             };
 
             const double base1 = 1.0e-4 / 2.0;
@@ -425,9 +434,9 @@ private:
             const double last_frac = 0.5;
             double last_df = last_frac - frac;
             if (last_df <= 0.0) last_df = base3;
-            frac += last_df;
-            grid.emplace_back(last_frac, last_df);
-        }
+            values[idx++] = std::make_pair(last_frac, last_df);
+            return values;
+        }();
         return grid;
     }
 

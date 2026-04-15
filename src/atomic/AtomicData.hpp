@@ -36,6 +36,7 @@ namespace dcr::atomic {
         base::IndexVec recycling_indices_;
         // Ion-temperature quadrature table for MCX (loaded once per AtomicData).
         std::vector<QuadraturePoint> mcx_quadrature_;
+        bool use_mccc_h2_dissociation_ = true;
 
         // Global Index Map
         std::map<std::string, std::map<int, std::map<int, base::Index>>> global_index_map_;

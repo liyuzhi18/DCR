@@ -69,14 +69,23 @@ inline dcr::solver::PlasmaTemperatures plasma_temperatures_at(const dcr::io::Con
     return dcr::solver::evaluate_plasma_temperatures(cfg, x_cm);
 }
 
+inline EEDFConfig make_eedf_config(const dcr::io::Config& cfg) {
+    EEDFConfig eedf_cfg;
+    eedf_cfg.type = cfg.plasma.eedf.type;
+    eedf_cfg.power_p = cfg.plasma.eedf.power_p;
+    eedf_cfg.hot_fraction = cfg.plasma.eedf.hot_fraction;
+    eedf_cfg.hot_temperature_factor = cfg.plasma.eedf.hot_temperature_factor;
+    return eedf_cfg;
+}
+
 struct EEDFContext {
     std::vector<double> energies;
     std::vector<double> weights;
     EEDF eedf;
     EEDFGridView grid;
 
-    explicit EEDFContext(double Te_eV)
-        : eedf(Te_eV, EEDFConfig{}), grid(energies, weights, &eedf) {
+    explicit EEDFContext(double Te_eV, const EEDFConfig& cfg = EEDFConfig{})
+        : eedf(Te_eV, cfg), grid(energies, weights, &eedf) {
         const auto energy_grid = dcr::physics::make_default_energy_grid();
         energies.reserve(energy_grid.size());
         weights.reserve(energy_grid.size());

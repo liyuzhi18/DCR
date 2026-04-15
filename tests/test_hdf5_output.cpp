@@ -77,6 +77,11 @@ int main() {
     assert(dataset_exists(file, "/population/flowA"));
     assert(dataset_exists(file, "/population/flowM"));
     assert(dataset_exists(file, "/population/total_full"));
+    assert(dataset_exists(file, "/timing/boundary_elapsed_seconds"));
+    assert(dataset_exists(file, "/timing/boundary_iterations"));
+    assert(dataset_exists(file, "/timing/marching_cell_elapsed_seconds"));
+    assert(dataset_exists(file, "/timing/marching_cell_iterations"));
+    assert(dataset_exists(file, "/timing/marching_cell_converged"));
     assert(dataset_exists(file, "/rates/Te_eV"));
     assert(dataset_exists(file, "/rates/Ti_eV"));
     assert(dataset_exists(file, "/rates/ne_cm3"));
@@ -101,6 +106,11 @@ int main() {
     const auto d_a = dataset_dims(file.openDataSet("/population/flowA"));
     const auto d_m = dataset_dims(file.openDataSet("/population/flowM"));
     const auto d_tot = dataset_dims(file.openDataSet("/population/total_full"));
+    const auto d_boundary_wall = dataset_dims(file.openDataSet("/timing/boundary_elapsed_seconds"));
+    const auto d_boundary_iters = dataset_dims(file.openDataSet("/timing/boundary_iterations"));
+    const auto d_cell_wall = dataset_dims(file.openDataSet("/timing/marching_cell_elapsed_seconds"));
+    const auto d_cell_iters = dataset_dims(file.openDataSet("/timing/marching_cell_iterations"));
+    const auto d_cell_conv = dataset_dims(file.openDataSet("/timing/marching_cell_converged"));
     const auto d_te = dataset_dims(file.openDataSet("/rates/Te_eV"));
     const auto d_ti = dataset_dims(file.openDataSet("/rates/Ti_eV"));
     const auto d_ne = dataset_dims(file.openDataSet("/rates/ne_cm3"));
@@ -123,6 +133,11 @@ int main() {
     assert(d_a.size() == 2 && d_a[0] == n_nodes && d_a[1] == nA);
     assert(d_m.size() == 2 && d_m[0] == n_nodes && d_m[1] == nM);
     assert(d_tot.size() == 2 && d_tot[0] == n_nodes && d_tot[1] == total_states);
+    assert(d_boundary_wall.size() == 1 && d_boundary_wall[0] == 1);
+    assert(d_boundary_iters.size() == 1 && d_boundary_iters[0] == 1);
+    assert(d_cell_wall.size() == 1 && d_cell_wall[0] == n_nodes - 1);
+    assert(d_cell_iters.size() == 1 && d_cell_iters[0] == n_nodes - 1);
+    assert(d_cell_conv.size() == 1 && d_cell_conv[0] == n_nodes - 1);
     assert(d_te.size() == 1 && d_te[0] == n_nodes);
     assert(d_ti.size() == 1 && d_ti[0] == n_nodes);
     assert(d_ne.size() == 1 && d_ne[0] == n_nodes);

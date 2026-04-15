@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/asimida/Desktop/DCR_code/build_omp_off/_deps/eigen3-subbuild/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

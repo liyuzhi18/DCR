@@ -21,9 +21,48 @@ double quasineutral_electron_density(const dcr::base::Vector& population,
     return std::max(0.0, ne);
 }
 
+void redirect_h2plus_dr_products_to_ground(const dcr::io::Config& config,
+                                           const std::vector<dcr::atomic::EnergyLevel>& levels,
+                                           dcr::base::Matrix& rates) {
+    if (!config.numerics.disable_h2plus_dr) return;
+    if (rates.rows() != rates.cols()) return;
+
+    const int total_states = static_cast<int>(levels.size());
+    if (rates.rows() != total_states) return;
+
+    int ground_row = -1;
+    for (int i = 0; i < total_states; ++i) {
+        const auto& level = levels[static_cast<size_t>(i)];
+        if (level.type == dcr::atomic::SpeciesType::Atom &&
+            level.charge == 0 &&
+            level.internal_id == 1) {
+            ground_row = i;
+            break;
+        }
+    }
+    if (ground_row < 0) return;
+
+    for (int col = 0; col < total_states; ++col) {
+        const auto& source = levels[static_cast<size_t>(col)];
+        if (source.atomicity != 2 || source.charge != 1 || !source.is_background) continue;
+        for (int row = 0; row < total_states; ++row) {
+            const auto& target = levels[static_cast<size_t>(row)];
+            if (target.type != dcr::atomic::SpeciesType::Atom) continue;
+            if (target.charge != 0 || target.internal_id <= 1) continue;
+            rates(ground_row, col) += rates(row, col);
+            rates(row, col) = 0.0;
+        }
+    }
+}
+
+dcr::base::Vector sanitize_background_population(const dcr::base::Vector& background_population,
+                                                 int total_states) {
+    if (background_population.size() == total_states) return background_population;
+    return dcr::base::Vector::Zero(total_states);
+}
+
 } // namespace
 
-// Build local matrix/source objects from the current iterate.
 LocalSystem assemble_local_system(
     const dcr::io::Config& config,
     const dcr::atomic::AtomicData& atomic_data,
@@ -34,21 +73,17 @@ LocalSystem assemble_local_system(
     const dcr::base::Vector& flowA,
     const dcr::base::Vector& flowM,
     double x_cm) {
-
     LocalSystem out;
-
     const int total_states = atomic_data.get_total_states();
-    out.population_for_rates = background_population;
-    if (out.population_for_rates.size() != total_states) {
-        out.population_for_rates = dcr::base::Vector::Zero(total_states);
-    }
+    const auto& levels = atomic_data.get_levels();
+    const auto temperatures = evaluate_plasma_temperatures(config, x_cm);
+    out.population_for_rates = sanitize_background_population(background_population, total_states);
+    out.R_full = dcr::base::Matrix::Zero(total_states, total_states);
 
     // Use background-only population for the main R assembly (match boundary behavior).
     // Recycling-flow populations are not injected into out.R_full.
 
     // Update ne from quasi-neutrality at this spatial/iterative state.
-    const auto& levels = atomic_data.get_levels();
-    const auto temperatures = evaluate_plasma_temperatures(config, x_cm);
     const double ne_local = quasineutral_electron_density(out.population_for_rates, levels);
     const LocalKineticContext plasma_local(
         plasma,
@@ -57,16 +92,19 @@ LocalSystem assemble_local_system(
         temperatures.ion_eV,
         ne_local
     );
-
-    out.R_full = dcr::base::Matrix::Zero(total_states, total_states);
     for (const auto& proc : atomic_data.get_processes()) {
         if (!proc) continue;
-        proc->apply(plasma_local.plasma(), plasma_local.grid(), out.population_for_rates, out.R_full, nullptr);
+        proc->apply(
+            plasma_local.plasma(),
+            plasma_local.grid(),
+            out.population_for_rates,
+            out.R_full,
+            nullptr
+        );
     }
+    redirect_h2plus_dr_products_to_ground(config, levels, out.R_full);
 
     // For S evaluation, use local total population = background + recycling-flow states.
-    // This keeps source coupling responsive to local cell populations without changing the
-    // main background-only R block used in the linear background solve.
     dcr::base::Vector population_for_source = out.population_for_rates;
     for (size_t i = 0; i < boundary.A_indices.size(); ++i) {
         const int gj = boundary.A_indices[i];
@@ -92,21 +130,27 @@ LocalSystem assemble_local_system(
             population_for_source(gj) += nM;
         }
     }
+
+    const double ne_source = quasineutral_electron_density(population_for_source, levels);
+    const LocalKineticContext plasma_source(
+        plasma,
+        grid,
+        temperatures.electron_eV,
+        temperatures.ion_eV,
+        ne_source
+    );
     dcr::base::Matrix R_for_S = dcr::base::Matrix::Zero(total_states, total_states);
-    {
-        const double ne_source = quasineutral_electron_density(population_for_source, levels);
-        const LocalKineticContext plasma_source(
-            plasma,
-            grid,
-            temperatures.electron_eV,
-            temperatures.ion_eV,
-            ne_source
+    for (const auto& proc : atomic_data.get_processes()) {
+        if (!proc) continue;
+        proc->apply(
+            plasma_source.plasma(),
+            plasma_source.grid(),
+            population_for_source,
+            R_for_S,
+            nullptr
         );
-        for (const auto& proc : atomic_data.get_processes()) {
-            if (!proc) continue;
-            proc->apply(plasma_source.plasma(), plasma_source.grid(), population_for_source, R_for_S, nullptr);
-        }
     }
+    redirect_h2plus_dr_products_to_ground(config, levels, R_for_S);
 
     // Build S on background rows with the same routing policy as boundary solve:
     // I rows: IA + IM, a rows: aM only, m rows: no recycling source.

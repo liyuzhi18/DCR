@@ -1,5 +1,7 @@
+solver:
+  mode: qss_dcr
 io:
-  output_dir: output/test_run_Tx_profile
+  output_dir: output/test_run_Tx_profile/exclude_mi
   atomic_data_root: atomic_data/
   data_tables_root: data_tables/
   verbose_logging: true
@@ -53,3 +55,4 @@ numerics:
   relaxation: 0.2
   marching_slow_iter_threshold: 100
   marching_guess_retries: 3
+  qss_exclude_molecular_ion_from_transient_reconstruction: true
