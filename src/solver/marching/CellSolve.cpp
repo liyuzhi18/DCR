@@ -85,6 +85,18 @@ std::string format_elapsed_seconds(double seconds) {
     return out.str();
 }
 
+const char* cell_status_label(CellImplicitStatus status) {
+    switch (status) {
+    case CellImplicitStatus::converged:
+        return "converged";
+    case CellImplicitStatus::stagnated:
+        return "stagnated";
+    case CellImplicitStatus::max_iter:
+    default:
+        return "max-iter";
+    }
+}
+
 void enforce_neutral_molecule_floor(
     dcr::base::Vector& nP,
     const dcr::base::Vector& nP_ref,
@@ -752,6 +764,7 @@ CellImplicitResult solve_cell_implicit(
         result.flowM_new = flowM_final;
         result.iterations = iterations;
         result.converged = converged;
+        result.status = converged ? CellImplicitStatus::converged : CellImplicitStatus::max_iter;
         const dcr::base::Vector bg_full =
             make_background_full(result.nP_new, boundary, total_states);
         result.local_final = assemble_local_system(
@@ -797,7 +810,7 @@ CellImplicitResult solve_cell_implicit(
                       << " T{e=" << cell_temperatures.electron_eV
                       << ", i=" << cell_temperatures.ion_eV
                       << "}"
-                      << (result.converged ? " converged" : " max-iter")
+                      << " " << cell_status_label(result.status)
                       << " in " << result.iterations
                       << " iterations (rel=" << final_rel
                       << ", resid_rel(diag)=" << result.final_resid_rel
@@ -1245,11 +1258,13 @@ CellImplicitResult solve_cell_implicit(
         if (strict_converged) {
             out.iterations = iter + 1;
             out.converged = true;
+            out.status = CellImplicitStatus::converged;
             break;
         }
         if (iter == max_iter - 1) {
             out.iterations = max_iter;
             out.converged = false;
+            out.status = CellImplicitStatus::max_iter;
         }
     }
 

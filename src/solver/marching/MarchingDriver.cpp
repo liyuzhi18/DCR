@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -262,6 +263,18 @@ dcr::base::Vector interpolate_restart_vector(
     return (1.0 - alpha) * values[i0] + alpha * values[i1];
 }
 
+const char* cell_status_reason(CellImplicitStatus status) {
+    switch (status) {
+    case CellImplicitStatus::converged:
+        return "converged";
+    case CellImplicitStatus::stagnated:
+        return "stagnated";
+    case CellImplicitStatus::max_iter:
+    default:
+        return "max_iter";
+    }
+}
+
 } // namespace
 
 MarchingHistory run_full_marching(
@@ -373,6 +386,193 @@ MarchingHistory run_full_marching(
         debug_cell = std::atoi(env);
     }
 
+    auto load_restart_guess = [&](double x_target,
+                                  const dcr::base::Vector& nP_ref,
+                                  const dcr::base::Vector& flowA_ref,
+                                  const dcr::base::Vector& flowM_ref,
+                                  dcr::base::Vector& nP_guess,
+                                  dcr::base::Vector& flowA_guess,
+                                  dcr::base::Vector& flowM_guess,
+                                  const dcr::base::Vector*& nP_ptr,
+                                  const dcr::base::Vector*& flowA_ptr,
+                                  const dcr::base::Vector*& flowM_ptr) {
+        nP_ptr = nullptr;
+        flowA_ptr = nullptr;
+        flowM_ptr = nullptr;
+        if (!restart_seed.valid) return;
+        nP_guess = interpolate_restart_vector(restart_seed.x_cm, restart_seed.nP_nodes, x_target);
+        flowA_guess = interpolate_restart_vector(restart_seed.x_cm, restart_seed.flowA_nodes, x_target);
+        flowM_guess = interpolate_restart_vector(restart_seed.x_cm, restart_seed.flowM_nodes, x_target);
+        if (nP_guess.size() == nP_ref.size()) nP_ptr = &nP_guess;
+        if (flowA_guess.size() == flowA_ref.size()) flowA_ptr = &flowA_guess;
+        if (flowM_guess.size() == flowM_ref.size()) flowM_ptr = &flowM_guess;
+    };
+
+    std::function<CellImplicitResult(
+        const dcr::base::Vector&,
+        const dcr::base::Vector&,
+        const dcr::base::Vector&,
+        double,
+        double,
+        double,
+        int,
+        bool,
+        bool,
+        const dcr::base::Vector*,
+        const dcr::base::Vector*,
+        const dcr::base::Vector*,
+        int)> solve_cell_with_recovery;
+
+    solve_cell_with_recovery =
+        [&](const dcr::base::Vector& nP_left,
+            const dcr::base::Vector& flowA_left,
+            const dcr::base::Vector& flowM_left,
+            double dx_cm,
+            double x_left,
+            double x_right,
+            int cell_index,
+            bool detailed_log_cell,
+            bool emit_summary_log,
+            const dcr::base::Vector* nP_init_ptr,
+            const dcr::base::Vector* flowA_init_ptr,
+            const dcr::base::Vector* flowM_init_ptr,
+            int recovery_depth) -> CellImplicitResult {
+        CellImplicitResult step = solve_cell_implicit(
+            config,
+            atomic_data,
+            plasma,
+            grid,
+            boundary,
+            levels,
+            nP_left,
+            flowA_left,
+            flowM_left,
+            dx_cm,
+            x_left,
+            x_right,
+            cell_index,
+            detailed_log_cell,
+            emit_summary_log,
+            nP_init_ptr,
+            flowA_init_ptr,
+            flowM_init_ptr
+        );
+
+        const bool can_recover =
+            (config.numerics.marching_solver == "log_newton_krylov_ptc") &&
+            !step.converged &&
+            recovery_depth > 0 &&
+            (step.status == CellImplicitStatus::stagnated ||
+             step.status == CellImplicitStatus::max_iter);
+        if (!can_recover) {
+            return step;
+        }
+
+        if (config.io.verbose_logging) {
+            std::cout << "[DCR_Solver] Marching cell " << cell_index
+                      << ": entering log-Newton substep recovery"
+                      << " dx=" << dx_cm
+                      << " reason=" << cell_status_reason(step.status)
+                      << " depth=" << recovery_depth
+                      << "\n";
+        }
+
+        const double x_mid = 0.5 * (x_left + x_right);
+        const double dx_half = 0.5 * dx_cm;
+
+        dcr::base::Vector nP_mid_guess;
+        dcr::base::Vector flowA_mid_guess;
+        dcr::base::Vector flowM_mid_guess;
+        const dcr::base::Vector* nP_mid_ptr = nullptr;
+        const dcr::base::Vector* flowA_mid_ptr = nullptr;
+        const dcr::base::Vector* flowM_mid_ptr = nullptr;
+        load_restart_guess(
+            x_mid,
+            nP_left,
+            flowA_left,
+            flowM_left,
+            nP_mid_guess,
+            flowA_mid_guess,
+            flowM_mid_guess,
+            nP_mid_ptr,
+            flowA_mid_ptr,
+            flowM_mid_ptr
+        );
+
+        CellImplicitResult left_step = solve_cell_with_recovery(
+            nP_left,
+            flowA_left,
+            flowM_left,
+            dx_half,
+            x_left,
+            x_mid,
+            cell_index,
+            false,
+            false,
+            nP_mid_ptr,
+            flowA_mid_ptr,
+            flowM_mid_ptr,
+            recovery_depth - 1
+        );
+        if (!left_step.converged) {
+            return step;
+        }
+
+        dcr::base::Vector nP_right_guess;
+        dcr::base::Vector flowA_right_guess;
+        dcr::base::Vector flowM_right_guess;
+        const dcr::base::Vector* nP_right_ptr = nullptr;
+        const dcr::base::Vector* flowA_right_ptr = nullptr;
+        const dcr::base::Vector* flowM_right_ptr = nullptr;
+        load_restart_guess(
+            x_right,
+            left_step.nP_new,
+            left_step.flowA_new,
+            left_step.flowM_new,
+            nP_right_guess,
+            flowA_right_guess,
+            flowM_right_guess,
+            nP_right_ptr,
+            flowA_right_ptr,
+            flowM_right_ptr
+        );
+
+        CellImplicitResult right_step = solve_cell_with_recovery(
+            left_step.nP_new,
+            left_step.flowA_new,
+            left_step.flowM_new,
+            dx_half,
+            x_mid,
+            x_right,
+            cell_index,
+            false,
+            false,
+            nP_right_ptr,
+            flowA_right_ptr,
+            flowM_right_ptr,
+            recovery_depth - 1
+        );
+        if (!right_step.converged) {
+            return step;
+        }
+
+        CellImplicitResult recovered = right_step;
+        recovered.iterations = left_step.iterations + right_step.iterations;
+        recovered.elapsed_seconds = left_step.elapsed_seconds + right_step.elapsed_seconds;
+        recovered.converged = true;
+        recovered.status = CellImplicitStatus::converged;
+
+        if (config.io.verbose_logging) {
+            std::cout << "[DCR_Solver] Marching cell " << cell_index
+                      << ": log-Newton substep recovery succeeded"
+                      << " depth=" << recovery_depth
+                      << " iterations=" << recovered.iterations
+                      << " wall=" << recovered.elapsed_seconds << " s"
+                      << "\n";
+        }
+        return recovered;
+    };
+
     // March cell-by-cell.
     for (size_t k = 0; k < dx.size(); ++k) {
         const dcr::base::Vector flowA_before = flowA;
@@ -401,13 +601,7 @@ MarchingHistory run_full_marching(
         }
 
         const int slow_iter_threshold = std::max(1, config.numerics.marching_slow_iter_threshold);
-        CellImplicitResult step = solve_cell_implicit(
-            config,
-            atomic_data,
-            plasma,
-            grid,
-            boundary,
-            levels,
+        CellImplicitResult step = solve_cell_with_recovery(
             nP_before,
             flowA_before,
             flowM_before,
@@ -419,7 +613,8 @@ MarchingHistory run_full_marching(
             true,
             nP_init_ptr,
             flowA_init_ptr,
-            flowM_init_ptr
+            flowM_init_ptr,
+            std::max(0, config.numerics.marching_guess_retries)
         );
 
         nP = step.nP_new;
@@ -432,7 +627,8 @@ MarchingHistory run_full_marching(
         if (config.io.verbose_logging) {
             if (!step.converged) {
                 std::cout << "[DCR_Solver] Marching cell " << cell_index
-                          << ": failed to converge in a single fixed-dx solve.\n";
+                          << ": failed to converge in a single fixed-dx solve"
+                          << " (status=" << cell_status_reason(step.status) << ").\n";
             } else if (step.iterations > slow_iter_threshold) {
                 std::cout << "[DCR_Solver] Marching cell " << cell_index
                           << ": converged, but required more than "
@@ -442,7 +638,8 @@ MarchingHistory run_full_marching(
         if (!step.converged && config.numerics.abort_on_marching_nonconvergence) {
             throw std::runtime_error(
                 "Marching cell " + std::to_string(cell_index) +
-                " reached marching_max_iterations without convergence."
+                " reached marching_max_iterations without convergence (status=" +
+                std::string(cell_status_reason(step.status)) + ")."
             );
         }
 
