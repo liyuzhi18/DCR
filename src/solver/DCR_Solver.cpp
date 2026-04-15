@@ -14,10 +14,6 @@
 #include "../physics/WallBoundary.hpp"
 #include "../state/PlasmaState.hpp"
 
-#ifdef DCR_USE_OPENMP
-#include <omp.h>
-#endif
-
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -64,10 +60,6 @@ void DCR_Solver::solve() {
         std::cout << "[DCR_Solver] States: " << total_states << "\n";
         std::cout << "[DCR_Solver] Processes: " << atomic_data.get_processes().size() << "\n";
         std::cout << "[DCR_Solver] Cells: " << config.grid.num_cells << "\n";
-#ifdef DCR_USE_OPENMP
-        std::cout << "[DCR_Solver] OpenMP kernels: enabled max_threads="
-                  << omp_get_max_threads() << "\n";
-#endif
     }
 
     // --- Wall recycling coefficients (atoms reflect, molecules desorb) ---

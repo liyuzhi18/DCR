@@ -1,1 +1,0 @@
-/usr/bin/c++  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/check_rate_matrix.dir/tests/test_rate_matrix.cpp.o -o bin/check_rate_matrix  libdcr_atomic.a libdcr_state.a

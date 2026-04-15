@@ -8,19 +8,6 @@
 #include "../src/state/PlasmaState.hpp"
 #include "../src/base/Types.hpp"
 
-#ifdef DCR_USE_OPENMP
-#include <omp.h>
-#endif
-
-namespace {
-
-bool close_enough(double a, double b, double rel_tol = 1e-9, double abs_tol = 1e-12) {
-    const double scale = std::max({1.0, std::abs(a), std::abs(b)});
-    return std::abs(a - b) <= abs_tol || std::abs(a - b) <= rel_tol * scale;
-}
-
-} // namespace
-
 int main() {
     std::cout << "--- Testing AtomicExcitationProcess ---\n";
 
@@ -84,29 +71,6 @@ int main() {
     const double k_rr = (ne > 0.0) ? r_rr / ne : 0.0;
     std::cout << "Photo-recombination: r=" << r_rr << "  k_rr=" << k_rr << "\n";
     assert(r_rr > 0.0);
-
-#ifdef DCR_USE_OPENMP
-    omp_set_dynamic(0);
-    auto run_rates = [&](int threads) {
-        omp_set_num_threads(threads);
-        dcr::base::Matrix rates = dcr::base::Matrix::Zero(3, 3);
-        proc.apply(plasma, grid, population, rates, nullptr);
-        ion_proc.apply(plasma, grid, population, rates, nullptr);
-        photo_proc.apply(plasma, grid, population, rates, nullptr);
-        return std::array<double, 3>{
-            rates(1, 0) / ne,
-            rates(2, 1) / ne,
-            rates(0, 2) / ne
-        };
-    };
-
-    const auto one_thread = run_rates(1);
-    const auto four_threads = run_rates(4);
-    for (size_t i = 0; i < one_thread.size(); ++i) {
-        assert(close_enough(one_thread[i], four_threads[i]));
-    }
-    std::cout << "Atomic OpenMP equivalence: PASS\n";
-#endif
 
     std::cout << "[PASS] AtomicExcitationProcess checks.\n";
     return 0;

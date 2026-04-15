@@ -1,2 +1,0 @@
-/usr/bin/ar qc libdcr_atomic.a CMakeFiles/dcr_atomic.dir/src/atomic/AtomicData.cpp.o CMakeFiles/dcr_atomic.dir/src/atomic/SpeciesFileReader.cpp.o
-/usr/bin/ranlib libdcr_atomic.a

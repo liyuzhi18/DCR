@@ -82,7 +82,7 @@ private:
         const double Eth = std::max({1e-6, threshold_ev_, fallback_gap});
         if (oscillator_strength_ <= 0.0) return 0.0;
         double acc = 0.0;
-        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
+        CRM_DETAIL_ACC_GRID_LOOP_HINT
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E <= Eth) continue;
@@ -101,7 +101,7 @@ private:
         const double fallback_gap = std::max(0.0, e_to_ev_ - e_from_ev_);
         const double Eth = std::max({1e-6, threshold_ev_, fallback_gap});
         double acc = 0.0;
-        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
+        CRM_DETAIL_ACC_GRID_LOOP_HINT
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E < 0.0) continue;
@@ -228,7 +228,7 @@ private:
     double integrate_rr(const EEDFGridView& grid) const {
         const double Eth = std::max(1e-6, threshold_ev_);
         double acc = 0.0;
-        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
+        CRM_DETAIL_ACC_GRID_LOOP_HINT
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E < 0.0) continue;
@@ -337,7 +337,7 @@ private:
     double integrate_eii(const EEDFGridView& grid) const {
         const double Eth = std::max(1e-6, threshold_ev_);
         double acc = 0.0;
-        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
+        CRM_DETAIL_ACC_GRID_LOOP_HINT
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E <= Eth) continue;
@@ -394,7 +394,7 @@ private:
                             const SecondaryFractionGrid& secondary_grid) const {
         if (excess_energy <= 0.0) return 0.0;
         double sum = 0.0;
-        CRM_DETAIL_OMP_SIMD_FOR_SUM
+        CRM_DETAIL_ACC_SIMD_SUM_HINT
         for (int idx = 0; idx < static_cast<int>(secondary_grid.size()); ++idx) {
             const double frac = secondary_grid[static_cast<size_t>(idx)].first;
             const double dfrac = secondary_grid[static_cast<size_t>(idx)].second;

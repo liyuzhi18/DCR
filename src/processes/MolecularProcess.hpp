@@ -278,7 +278,7 @@ public:
 private:
     double integrate(const EEDFGridView& grid) const {
         double acc = 0.0;
-        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
+        CRM_DETAIL_ACC_GRID_LOOP_HINT
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             const double sigma = table_.sample(E);
@@ -330,7 +330,7 @@ private:
     double integrate(const EEDFGridView& grid) const {
         const double Eth = std::max(1e-6, threshold_ev_);
         double acc = 0.0;
-        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
+        CRM_DETAIL_ACC_GRID_LOOP_HINT
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E <= Eth) continue;
@@ -412,7 +412,7 @@ private:
     double integrate(const EEDFGridView& grid) const {
         const double Eth = std::max(1e-6, threshold_ev_);
         double acc = 0.0;
-        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
+        CRM_DETAIL_ACC_GRID_LOOP_HINT
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E <= Eth) continue;
@@ -538,7 +538,7 @@ private:
 
     double integrate(const EEDFGridView& grid) const {
         double acc = 0.0;
-        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
+        CRM_DETAIL_ACC_GRID_LOOP_HINT
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (!(E > 0.0)) continue;
@@ -600,23 +600,6 @@ public:
 private:
     double integrate(const EEDFGridView& grid) const {
         double acc = 0.0;
-        const bool can_break_early = grid.size() < crm_detail::OMP_PARALLEL_GRID_SIZE_THRESHOLD;
-#ifdef DCR_USE_OPENMP
-        if (!can_break_early) {
-            CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
-            for (size_t i = 0; i < grid.size(); ++i) {
-                const double E = grid.energy(i);
-                if (E > RA_EMAX) continue;
-                if (E <= 0.0) continue;
-                const double sigma = coeff_ * std::sqrt(E) / (ED_EB + E) * 1.0e-18;
-                if (!(sigma > 0.0)) continue;
-                const double val = grid.value_at(i);
-                if (val <= 0.0) continue;
-                acc += sigma * electron_speed(E) * val * grid.weight(i);
-            }
-            return acc;
-        }
-#endif
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E > RA_EMAX) break;
@@ -674,7 +657,7 @@ public:
 private:
     double integrate(const EEDFGridView& grid) const {
         double acc = 0.0;
-        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
+        CRM_DETAIL_ACC_GRID_LOOP_HINT
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E <= 0.0) continue;
@@ -749,7 +732,7 @@ private:
         double acc = 0.0;
         const double e_min = mccc_table_.energies.front();
         const double e_max = mccc_table_.energies.back();
-        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
+        CRM_DETAIL_ACC_GRID_LOOP_HINT
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E < e_min) continue;
@@ -938,7 +921,7 @@ private:
     double integrate_eedf(const EEDFGridView& grid) const {
         if (flag_ != 99 || !grid.valid()) return 0.0;
         double acc = 0.0;
-        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
+        CRM_DETAIL_ACC_GRID_LOOP_HINT
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             const double sigma = cross_section(E);
@@ -1151,7 +1134,7 @@ public:
 private:
     double integrate(const EEDFGridView& grid) const {
         double acc = 0.0;
-        CRM_DETAIL_OMP_PARALLEL_FOR_ACC_GRID
+        CRM_DETAIL_ACC_GRID_LOOP_HINT
         for (size_t i = 0; i < grid.size(); ++i) {
             const double E = grid.energy(i);
             if (E < threshold_ev_ || E > MIDE_EMAX) continue;

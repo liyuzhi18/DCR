@@ -213,7 +213,8 @@ BackgroundSolveResult solve_background_at_cell_log(
         if (gi >= 0 && gi < static_cast<int>(levels.size())) p_pos[static_cast<size_t>(gi)] = i;
     }
 
-    const dcr::base::Vector bg_full = make_background_full(nP_guess, boundary, static_cast<int>(levels.size()));
+    const dcr::base::Vector bg_full =
+        make_background_full(nP_guess, boundary, static_cast<int>(levels.size()));
     double n_I = 0.0;
     for (int gi : boundary.ion_indices) {
         if (gi < 0 || gi >= static_cast<int>(levels.size()) || gi >= bg_full.size()) continue;
@@ -250,7 +251,9 @@ BackgroundSolveResult solve_background_at_cell_log(
     dcr::base::Matrix A = dcr::base::Matrix::Zero(Pn, Pn);
     if (n_I > 0.0) {
         for (int gi : boundary.ion_indices) {
-            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size())) ? p_pos[static_cast<size_t>(gi)] : -1;
+            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
+                ? p_pos[static_cast<size_t>(gi)]
+                : -1;
             if (pi >= 0 && gi >= 0 && gi < static_cast<int>(levels.size())) {
                 A(pi, pi) = L_I / n_I;
             }
@@ -259,14 +262,18 @@ BackgroundSolveResult solve_background_at_cell_log(
     if (n_a > 0.0) {
         const double coeff = L_a / n_a;
         for (int gi : boundary.atom_bg_indices) {
-            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size())) ? p_pos[static_cast<size_t>(gi)] : -1;
+            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
+                ? p_pos[static_cast<size_t>(gi)]
+                : -1;
             if (pi >= 0) A(pi, pi) = coeff;
         }
     }
     if (n_m > 0.0) {
         const double coeff = L_m / n_m;
         for (int gi : boundary.mol_bg_indices) {
-            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size())) ? p_pos[static_cast<size_t>(gi)] : -1;
+            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
+                ? p_pos[static_cast<size_t>(gi)]
+                : -1;
             if (pi >= 0) A(pi, pi) = coeff;
         }
     }
@@ -278,7 +285,8 @@ BackgroundSolveResult solve_background_at_cell_log(
     for (int i = 0; i < Pn; ++i) {
         const int gi = boundary.P_indices[static_cast<size_t>(i)];
         stoich(i) = (gi >= 0 && gi < static_cast<int>(levels.size()))
-            ? static_cast<double>(levels[gi].atomicity) : 1.0;
+            ? static_cast<double>(levels[gi].atomicity)
+            : 1.0;
     }
 
     const double flow_nuclei = nuclei_sum(flowA_new, boundary.A_indices, levels)
@@ -286,7 +294,8 @@ BackgroundSolveResult solve_background_at_cell_log(
     const double target_bg_nuclei = std::max(0.0, config.plasma.total_density - flow_nuclei);
 
     auto set_original_diag = [&](const dcr::base::Vector& n_eval) {
-        const dcr::base::Vector r = Rpp * n_eval - (A * n_eval - local_system.S_background);
+        const dcr::base::Vector r =
+            Rpp * n_eval - (A * n_eval - local_system.S_background);
         result.linear_residual_norm = r.norm();
         result.linear_mse = r.squaredNorm() / static_cast<double>(Pn);
         const double lhs_norm = (Rpp * n_eval).norm();
@@ -455,7 +464,10 @@ CellImplicitResult solve_cell_implicit_log_newton(
     double x_right_cm,
     int cell_index,
     bool detailed_log,
-    bool emit_summary_log) {
+    bool emit_summary_log,
+    const dcr::base::Vector* nP_init_override,
+    const dcr::base::Vector* flowA_init_override,
+    const dcr::base::Vector* flowM_init_override) {
 
     CellImplicitResult out;
     const auto solve_timer_start = std::chrono::steady_clock::now();
@@ -465,17 +477,18 @@ CellImplicitResult solve_cell_implicit_log_newton(
     dcr::base::Vector flowM_iter = flowM_old;
     const dcr::base::Vector& flowA_inflow = flowA_old;
     const dcr::base::Vector& flowM_inflow = flowM_old;
+    if (nP_init_override && nP_init_override->size() == nP_old.size()) {
+        nP_iter = nP_init_override->cwiseMax(kLogStateFloor);
+    }
+    if (flowA_init_override && flowA_init_override->size() == flowA_old.size()) {
+        flowA_iter = flowA_init_override->cwiseMax(kLogStateFloor);
+    }
+    if (flowM_init_override && flowM_init_override->size() == flowM_old.size()) {
+        flowM_iter = flowM_init_override->cwiseMax(kLogStateFloor);
+    }
 
-    const double marching_tol =
-        (config.numerics.marching_tolerance > 0.0)
-            ? config.numerics.marching_tolerance
-            : config.numerics.tolerance;
-    const double tol = std::max(marching_tol, 1e-12);
-    const int marching_cap =
-        (config.numerics.marching_max_iterations > 0)
-            ? config.numerics.marching_max_iterations
-            : config.numerics.max_iterations;
-    const int max_iter = std::max(marching_cap, 1);
+    const double tol = std::max(config.numerics.tolerance, 1e-12);
+    const int max_iter = std::max(config.numerics.max_iterations, 1);
     const auto cell_temperatures = evaluate_plasma_temperatures(config, x_right_cm);
 
     const int nP_size = nP_iter.size();
@@ -533,24 +546,45 @@ CellImplicitResult solve_cell_implicit_log_newton(
 
         const dcr::base::Vector bg_iter_full =
             make_background_full(eval.nP_iter, boundary, total_states);
-        const auto background_rates = assemble_background_rate_matrix(
-            config, atomic_data, plasma, grid, bg_iter_full, x_right_cm
+        const auto local_for_flow = assemble_local_system(
+            config,
+            atomic_data,
+            plasma,
+            grid,
+            boundary,
+            bg_iter_full,
+            eval.flowA_iter,
+            eval.flowM_iter,
+            x_right_cm
         );
-        LocalSystem local_for_flow;
-        local_for_flow.population_for_rates = background_rates.population_for_rates;
-        local_for_flow.R_full = background_rates.R_full;
-        local_for_flow.S_background = dcr::base::Vector::Zero(static_cast<int>(boundary.P_indices.size()));
         eval.flow_advanced = advance_recycling_flow_one_step(
-            config, atomic_data, boundary, local_for_flow,
-            flowA_inflow, flowM_inflow, dx_cm
+            config,
+            atomic_data,
+            boundary,
+            local_for_flow,
+            flowA_inflow,
+            flowM_inflow,
+            dx_cm
         );
-        eval.local_for_bg = assemble_local_system_from_background_rate_matrix(
-            config, atomic_data, plasma, grid, boundary, background_rates,
-            eval.flow_advanced.flowA_next, eval.flow_advanced.flowM_next, x_right_cm
+        eval.local_for_bg = assemble_local_system(
+            config,
+            atomic_data,
+            plasma,
+            grid,
+            boundary,
+            bg_iter_full,
+            eval.flow_advanced.flowA_next,
+            eval.flow_advanced.flowM_next,
+            x_right_cm
         );
         eval.bg_solve = solve_background_at_cell_log(
-            config, boundary, levels, eval.local_for_bg, eval.nP_iter,
-            eval.flow_advanced.flowA_next, eval.flow_advanced.flowM_next
+            config,
+            boundary,
+            levels,
+            eval.local_for_bg,
+            eval.nP_iter,
+            eval.flow_advanced.flowA_next,
+            eval.flow_advanced.flowM_next
         );
         eval.x_image = project_positive_state(pack_state(
             eval.bg_solve.nP_new,
@@ -575,19 +609,32 @@ CellImplicitResult solve_cell_implicit_log_newton(
                                bool converged,
                                double final_rel,
                                double final_resid_rel) {
-        const dcr::base::Vector x_final = project_positive_state(decode_positive_state(y_final));
+        const dcr::base::Vector x_final =
+            project_positive_state(decode_positive_state(y_final));
         unpack_state(x_final, out.nP_new, out.flowA_new, out.flowM_new);
         out.iterations = iterations;
         out.converged = converged;
         const dcr::base::Vector bg_full =
             make_background_full(out.nP_new, boundary, total_states);
         out.local_final = assemble_local_system(
-            config, atomic_data, plasma, grid, boundary, bg_full,
-            out.flowA_new, out.flowM_new, x_right_cm
+            config,
+            atomic_data,
+            plasma,
+            grid,
+            boundary,
+            bg_full,
+            out.flowA_new,
+            out.flowM_new,
+            x_right_cm
         );
         out.flow_final = advance_recycling_flow_one_step(
-            config, atomic_data, boundary, out.local_final,
-            out.flowA_new, out.flowM_new, 0.0
+            config,
+            atomic_data,
+            boundary,
+            out.local_final,
+            out.flowA_new,
+            out.flowM_new,
+            0.0
         );
         out.final_rel = final_rel;
         out.final_resid_rel = final_resid_rel;
@@ -602,8 +649,10 @@ CellImplicitResult solve_cell_implicit_log_newton(
                 if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
                 bg_nuclei += levels[gi].atomicity * std::max(out.nP_new(i), 0.0);
             }
-            const double flowA_nuclei = nuclei_sum(out.flowA_new, boundary.A_indices, levels);
-            const double flowM_nuclei = nuclei_sum(out.flowM_new, boundary.M_indices, levels);
+            const double flowA_nuclei =
+                nuclei_sum(out.flowA_new, boundary.A_indices, levels);
+            const double flowM_nuclei =
+                nuclei_sum(out.flowM_new, boundary.M_indices, levels);
             const double total_nuclei = bg_nuclei + flowA_nuclei + flowM_nuclei;
             const double flowA_total = positive_sum(out.flowA_new);
             const double flowM_total = positive_sum(out.flowM_new);
@@ -714,16 +763,8 @@ CellImplicitResult solve_cell_implicit_log_newton(
         );
         dcr::base::Vector delta = gmres.step;
         if (!delta.allFinite() || delta.norm() == 0.0) {
+            delta = 0.1 * (eval.y_image - eval.y_projected);
             tau = std::max(1.0e-6, 0.5 * tau);
-            iterations = iter + 1;
-            y_work = eval.y_projected;
-            if (config.io.verbose_logging && detailed_log) {
-                std::cout << "[DCR_Solver] Marching cell " << cell_index
-                          << ": LOG-NK produced an invalid Newton direction; terminating cell solve"
-                          << " tau=" << tau
-                          << "\n";
-            }
-            break;
         }
 
         const double norm0 = std::max(1.0e-30, eval.residual.norm());
@@ -743,16 +784,18 @@ CellImplicitResult solve_cell_implicit_log_newton(
         }
 
         if (!accepted) {
+            alpha = std::min(0.1, std::max(alpha_min, 0.05 * tau));
+            accepted_eval = evaluate_map(
+                eval.y_projected + alpha * (eval.y_image - eval.y_projected)
+            );
             tau = std::max(1.0e-6, 0.5 * tau);
-            iterations = iter + 1;
-            y_work = eval.y_projected;
             if (config.io.verbose_logging && detailed_log) {
                 std::cout << "[DCR_Solver] Marching cell " << cell_index
-                          << ": LOG-NK line search failed; terminating cell solve"
+                          << ": LOG-NK line search failed, falling back to conservative log-Picard step"
+                          << " alpha=" << alpha
                           << " tau=" << tau
                           << "\n";
             }
-            break;
         } else if (alpha >= 0.75 && gmres.converged) {
             tau = std::min(tau_max, 1.5 * tau);
         } else if (alpha < 0.25 || !gmres.converged) {

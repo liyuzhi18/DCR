@@ -820,7 +820,10 @@ CellImplicitResult solve_cell_implicit(
             x_right_cm,
             cell_index,
             detailed_log,
-            emit_summary_log
+            emit_summary_log,
+            nullptr,
+            nullptr,
+            nullptr
         );
     }
     const bool use_nk_solver =
