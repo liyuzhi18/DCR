@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <utility>
 #include "../base/Types.hpp"
 
 namespace dcr::io {
@@ -93,15 +94,28 @@ namespace dcr::io {
         // Boundary nonlinear solver selection.
         // - "picard": current damped fixed-point boundary solver
         // - "newton_krylov_ptc": Newton-Krylov with pseudo-transient continuation
+        // - "log_newton_krylov_ptc": log-density Newton-Krylov boundary solve
+        //   ("log_newton" is accepted as a short alias)
         std::string boundary_solver = "picard";
         // Marching nonlinear solver selection.
         // - "picard": current damped fixed-point marching solver
+        // - "picard_then_anderson": try Picard first, retry failed cells with Anderson
+        // - "anderson"/"anderson_picard"/"picard_anderson":
+        //   Anderson-accelerated fixed-point solve with Picard fallback
+        // - "anderson_newton_rescue"/"picard_anderson_newton_rescue":
+        //   Anderson solve with bounded Newton-Krylov rescue on floor stalls
         // - "newton_krylov_ptc": Newton-Krylov with pseudo-transient continuation
         // - "log_newton_krylov_ptc": log-density Newton-Krylov marching solve
+        // - "picard_then_log_newton_krylov_ptc": short Picard warm start, then log Newton
+        // - "anderson_then_log_newton_krylov_ptc": Anderson warm start, then log Newton
+        // - "anderson_then_newton_krylov_ptc": Anderson warm start, then Newton-Krylov
         std::string marching_solver = "picard";
         // Marching fallback controls at fixed dx.
         int marching_slow_iter_threshold = 100;
         int marching_guess_retries = 3;
+        int marching_picard_warmup_iterations = 5;
+        base::Real marching_picard_newton_start_rel = 1e-4;
+        base::Real marching_picard_newton_stall_rel = 5e-4;
         // If true, abort the whole run when a marched cell reaches the maximum
         // iteration count without convergence.
         bool abort_on_marching_nonconvergence = false;
@@ -118,6 +132,10 @@ namespace dcr::io {
         int marching_nk_max_restarts = 2;
         base::Real marching_nk_fd_eps = 1e-6;
         base::Real marching_nk_alpha_min = 1e-4;
+        // Anderson acceleration controls for the fixed-point marching map.
+        int marching_anderson_depth = 5;
+        base::Real marching_anderson_beta = 1.0;
+        base::Real marching_anderson_regularization = 1e-12;
         // Minimum neutral-H2 background retained in marched cells, expressed as
         // a fraction of the previous cell's neutral molecular background total.
         // Zero disables the floor.
@@ -127,10 +145,10 @@ namespace dcr::io {
         // Zero out H2+(bg) -> H(n>=2) coupling in R_full to mimic ADAS-like behavior
         // (no excited-H production from DR channel e + H2+ -> H(n=2,3)).
         bool disable_h2plus_dr = false;
-        // Use raw MCCC H2 dissociation cross sections with runtime EEDF integration
-        // for neutral molecular "de" channels. If false, prefer the reconstructed
-        // dissociation fit CSV when present, otherwise keep the original fitted de law.
-        bool use_mccc_h2_dissociation = true;
+        // H2 dissociation model for neutral molecular "de" channels.
+        // Empty defaults to mccc.
+        // Explicit values: mccc/mccc_total, reconstructed/reconstruct, janev/janev_table, legacy.
+        std::string h2_dissociation_model;
     };
 
     // --- The Main Config Object ---

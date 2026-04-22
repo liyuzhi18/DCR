@@ -44,7 +44,7 @@ namespace dcr::atomic {
             MCCCDissociationRateTable table;
             std::ifstream in(path);
             if (!in) {
-                std::cout << "[AtomicData] MCCC H2 dissociation fit not found: " << path
+                std::cout << "[AtomicData] H2 dissociation rate-fit file not found: " << path
                           << " (using legacy de fits)\n";
                 return table;
             }
@@ -62,7 +62,7 @@ namespace dcr::atomic {
                 else if (!header[i].empty() && header[i][0] == 'a') coeff_cols.push_back(i);
             }
             if (vi_col >= header.size() || threshold_col >= header.size() || coeff_cols.empty()) {
-                std::cout << "[AtomicData] Invalid MCCC H2 dissociation fit header: " << path << "\n";
+                std::cout << "[AtomicData] Invalid H2 dissociation rate-fit header: " << path << "\n";
                 return table;
             }
 
@@ -91,7 +91,7 @@ namespace dcr::atomic {
             for (const auto& fit : table.fits_by_vi) {
                 if (fit.valid()) ++count;
             }
-            std::cout << "[AtomicData] Loaded MCCC H2 dissociation fits: " << count
+            std::cout << "[AtomicData] Loaded H2 dissociation rate fits: " << count
                       << " levels from " << path << "\n";
             return table;
         }
@@ -105,6 +105,107 @@ namespace dcr::atomic {
                 it = cache.emplace(key, load_mccc_dissociation_rate_table(path)).first;
             }
             return it->second;
+        }
+
+        std::string normalize_dissociation_model(std::string model) {
+            std::transform(model.begin(), model.end(), model.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            if (model.empty()) return "mccc";
+            if (model == "janev" || model == "janev_legacy" ||
+                model == "janev_table" || model == "celiberto") {
+                return "janev_table";
+            }
+            if (model == "mccc" || model == "mccc_total" || model == "mccc-total") {
+                return "mccc";
+            }
+            if (model == "reconstructed" || model == "reconstruct") {
+                return "reconstructed";
+            }
+            if (model == "legacy") {
+                return "legacy";
+            }
+            std::cout << "[AtomicData] Unknown h2_dissociation_model='" << model
+                      << "'; using mccc\n";
+            return "mccc";
+        }
+
+        double neutral_h2_dissociation_threshold_ev(const MolecularLevel& level) {
+            if (level.dissociation_energy_ev > 0.0) return level.dissociation_energy_ev;
+            constexpr double h2_de_ev = 4.74675;
+            return std::max(1.0e-6, h2_de_ev - level.excitation_energy_ev);
+        }
+
+        using DissociationFit = std::array<double, 6>;
+
+        bool janev_u_channel(int v, DissociationFit& fit) {
+            static constexpr std::array<DissociationFit, 11> table = {{
+                DissociationFit{{-50.862, 0.92494, -28.102, -4.5231e-2, 0.46439, 0.87950}},
+                DissociationFit{{-48.125, 0.91260, -24.873, -4.9898e-2, 0.45288, 0.87604}},
+                DissociationFit{{-41.218, 0.96738, -23.167, -4.8546e-2, -1.7222, 0.19858}},
+                DissociationFit{{-37.185, 0.96391, -21.264, -5.1701e-2, -1.8121, 0.19281}},
+                DissociationFit{{-35.397, 0.85294, -18.452, -6.5220e-2, -0.56595, 8.8997e-2}},
+                DissociationFit{{-33.861, 0.93010, -20.852, -3.0160e-2, 5.5610, 0.45548}},
+                DissociationFit{{-23.751, 0.94020, -19.626, -3.2760e-2, -0.3982, 1.58655}},
+                DissociationFit{{-19.988, 0.83369, -18.700, -3.5520e-2, -0.38065, 1.74205}},
+                DissociationFit{{-18.278, 0.82040, -17.754, -4.4530e-2, -0.10045, 2.5025}},
+                DissociationFit{{-13.589, 0.70210, -16.850, -5.0120e-2, -0.77502, 0.3423}},
+                DissociationFit{{-11.504, 0.84513, -14.603, -6.7750e-2, -3.2615, 0.13666}},
+            }};
+            if (v < 0 || v >= static_cast<int>(table.size())) return false;
+            fit = table[static_cast<size_t>(v)];
+            return true;
+        }
+
+        bool janev_g_channel(int v, DissociationFit& fit) {
+            struct Row {
+                int v;
+                DissociationFit fit;
+            };
+            static constexpr std::array<Row, 5> table = {{
+                Row{0,  DissociationFit{{-15.760, -5.2659e-2, -84.679, 1.0414, -8.2933, 0.18756}}},
+                Row{3,  DissociationFit{{-16.966, -4.41421e-2, -53.814, 0.96478, -1.8705, 0.30887}}},
+                Row{6,  DissociationFit{{-14.430, -5.8984e-2, -33.755, 0.90310, -1.4420, 6.9051e-3}}},
+                Row{9,  DissociationFit{{-14.423, -5.4825e-2, -16.684, 0.88550, -1.6937, 6.9260e-3}}},
+                Row{12, DissociationFit{{-19.921, -9.2022e-3, -46.095, 0.62850, 44.245, 0.28407}}},
+            }};
+            if (v < table.front().v || v > table.back().v) return false;
+            for (size_t i = 0; i + 1 < table.size(); ++i) {
+                const Row& lo = table[i];
+                const Row& hi = table[i + 1];
+                if (v < lo.v || v > hi.v) continue;
+                const double f = static_cast<double>(v - lo.v) /
+                                 static_cast<double>(hi.v - lo.v);
+                for (size_t j = 0; j < fit.size(); ++j) {
+                    fit[j] = lo.fit[j] + f * (hi.fit[j] - lo.fit[j]);
+                }
+                return true;
+            }
+            return false;
+        }
+
+        std::vector<DissociationFit> janev_dissociation_channels(int v) {
+            std::vector<DissociationFit> channels;
+            DissociationFit fit{};
+            if (janev_u_channel(v, fit)) channels.push_back(fit);
+            if (janev_g_channel(v, fit)) channels.push_back(fit);
+            return channels;
+        }
+
+        std::filesystem::path find_mccc_dissociation_table(
+            const std::filesystem::path& mccc_de_dir,
+            int v
+        ) {
+            const std::string filename =
+                "MCCC-el-H2-DISS.X1Sg_vi=" + std::to_string(v) + ".txt";
+            const std::array<std::filesystem::path, 2> candidates{{
+                mccc_de_dir / filename,
+                mccc_de_dir / ("vi=" + std::to_string(v)) / filename,
+            }};
+            for (const auto& path : candidates) {
+                if (std::filesystem::exists(path)) return path;
+            }
+            return {};
         }
 
         std::vector<QuadraturePoint> load_quadrature_table(const std::filesystem::path& path) {
@@ -183,7 +284,8 @@ namespace dcr::atomic {
     AtomicData::AtomicData(const dcr::io::Config& config) {
         std::string root_dir = config.io.atomic_data_root;
         if (!root_dir.empty() && root_dir.back() != '/') root_dir += "/";
-        use_mccc_h2_dissociation_ = config.numerics.use_mccc_h2_dissociation;
+        h2_dissociation_model_ = normalize_dissociation_model(
+            config.numerics.h2_dissociation_model);
 
         // Load MCX quadrature table from data_tables (used for ion-temperature integrals).
         std::filesystem::path data_root = config.io.data_tables_root;
@@ -343,12 +445,19 @@ namespace dcr::atomic {
             std::filesystem::path(file_path).parent_path() / "mccc-dissociation";
         const std::filesystem::path reconstructed_de_fit_path =
             std::filesystem::path(file_path).parent_path() / "reconstructed_dissociation_rate_fit.csv";
+        const bool use_mccc_de = h2_dissociation_model_ == "mccc";
+        const bool use_reconstructed_de = h2_dissociation_model_ == "reconstructed";
+        const bool use_janev_table_de = h2_dissociation_model_ == "janev_table";
+        const bool use_legacy_file_de = h2_dissociation_model_ == "legacy";
+        const bool use_total_h2_de =
+            use_mccc_de || use_reconstructed_de || use_janev_table_de;
         const MCCCDissociationRateTable* reconstructed_de_fit_table = nullptr;
-        if (!use_mccc_h2_dissociation_) {
+        if (use_reconstructed_de) {
             reconstructed_de_fit_table = &get_mccc_dissociation_rate_table(reconstructed_de_fit_path);
         }
         std::unordered_set<int> built_mccc_de_v;
         std::unordered_set<int> built_reconstructed_fit_v;
+        std::unordered_set<int> built_janev_table_v;
         std::unordered_map<int, const MolecularLevel*> level_by_local;
         level_by_local.reserve(raw->levels.size());
         for (const auto& lvl : raw->levels) {
@@ -443,8 +552,22 @@ namespace dcr::atomic {
             else if (tr.type == "mi") {
                 std::array<double, 7> p;
                 std::copy_n(tr.params.begin(), p.size(), p.begin());
+                std::array<double, 19> branch_thresholds{};
+                branch_thresholds.fill(std::max(1.0e-6, tr.threshold_ev));
+                double base_target_energy = 0.0;
+                if (i_to >= 0 && i_to < static_cast<base::Index>(levels_.size())) {
+                    base_target_energy = levels_[static_cast<size_t>(i_to)].energy_eV;
+                }
+                for (size_t vib = 0; vib < branch_thresholds.size(); ++vib) {
+                    const base::Index target = i_to + static_cast<base::Index>(vib);
+                    if (target < 0 || target >= static_cast<base::Index>(levels_.size())) break;
+                    const double branch_delta =
+                        levels_[static_cast<size_t>(target)].energy_eV - base_target_energy;
+                    branch_thresholds[vib] =
+                        std::max(std::max(1.0e-6, tr.threshold_ev), tr.threshold_ev + branch_delta);
+                }
                 processes_.push_back(std::make_shared<MolecularMIProcess>(
-                    i_from, i_to, tr.threshold_ev, p
+                    i_from, i_to, tr.threshold_ev, p, branch_thresholds
                 ));
             }
             else if (tr.type == "dr") {
@@ -486,44 +609,28 @@ namespace dcr::atomic {
                 ));
             }
             else if (tr.type == "de") {
+                auto lvl_it = level_by_local.find(tr.reactants[0].local_index);
+                const bool neutral_h2_de =
+                    lvl_it != level_by_local.end() &&
+                    is_neutral_h2_level(*lvl_it->second);
+
+                // Total H2 dissociation models are added once per v after the file loop.
+                // Do not let multiple legacy de rows inject duplicate total-rate channels.
+                if (use_total_h2_de && neutral_h2_de) {
+                    continue;
+                }
+
                 const base::Index i_to2 = (tr.product_count > 1)
                     ? resolve_molecular_state(tr.products[1]) : -1;
                 if (i_to == -1 || i_to2 == -1) continue;
                 std::array<double, 6> p;
                 std::copy_n(tr.params.begin(), p.size(), p.begin());
-                auto lvl_it = level_by_local.find(tr.reactants[0].local_index);
-                if (use_mccc_h2_dissociation_ &&
-                    lvl_it != level_by_local.end() &&
-                    is_neutral_h2_level(*lvl_it->second)) {
-                    const int v = extract_vibrational_quantum(lvl_it->second->label);
-                    const std::filesystem::path mccc_path =
-                        mccc_de_dir / ("MCCC-el-H2-DISS.X1Sg_vi=" + std::to_string(v) + ".txt");
-                    if (std::filesystem::exists(mccc_path)) {
-                        if (built_mccc_de_v.find(v) != built_mccc_de_v.end()) {
-                            continue;
-                        }
-                        processes_.push_back(std::make_shared<MolecularDEProcess>(
-                            i_from, i_to, i_to2, tr.threshold_ev, p, mccc_path.string()
-                        ));
-                        built_mccc_de_v.insert(v);
-                        continue;
-                    }
-                }
-                if (!use_mccc_h2_dissociation_ &&
-                    reconstructed_de_fit_table != nullptr &&
-                    lvl_it != level_by_local.end() &&
-                    is_neutral_h2_level(*lvl_it->second)) {
-                    const int v = extract_vibrational_quantum(lvl_it->second->label);
-                    if (const auto* fit = reconstructed_de_fit_table->fit_for_vi(v); fit != nullptr) {
-                        processes_.push_back(std::make_shared<MolecularDEProcess>(
-                            i_from, i_to, i_to2, fit->threshold_ev, p, std::string{}, fit->coeffs
-                        ));
-                        built_reconstructed_fit_v.insert(v);
-                        continue;
-                    }
-                }
                 processes_.push_back(std::make_shared<MolecularDEProcess>(
-                    i_from, i_to, i_to2, tr.threshold_ev, p
+                    i_from, i_to, i_to2,
+                    neutral_h2_de
+                        ? neutral_h2_dissociation_threshold_ev(*lvl_it->second)
+                        : tr.threshold_ev,
+                    p
                 ));
             }
             else if (tr.type == "ed") {
@@ -600,43 +707,97 @@ namespace dcr::atomic {
             }
         }
 
-        if (use_mccc_h2_dissociation_ && atomic_ground_index >= 0) {
-            int synthetic_mccc_de = 0;
+        if (atomic_ground_index >= 0 && use_mccc_de) {
+            int added_mccc_de = 0;
             for (const auto& lvl : raw->levels) {
                 if (!is_neutral_h2_level(lvl)) continue;
                 const int v = extract_vibrational_quantum(lvl.label);
                 if (built_mccc_de_v.find(v) != built_mccc_de_v.end()) continue;
-                const std::filesystem::path mccc_path =
-                    mccc_de_dir / ("MCCC-el-H2-DISS.X1Sg_vi=" + std::to_string(v) + ".txt");
-                if (!std::filesystem::exists(mccc_path)) continue;
+                const std::filesystem::path mccc_path = find_mccc_dissociation_table(mccc_de_dir, v);
+                if (mccc_path.empty()) continue;
 
                 const base::Index i_from = find_global_index(name, 0, lvl.local_index);
                 if (i_from < 0) continue;
 
                 processes_.push_back(std::make_shared<MolecularDEProcess>(
                     i_from, atomic_ground_index, atomic_ground_index,
-                    lvl.dissociation_energy_ev, std::array<double, 6>{}, mccc_path.string()
+                    neutral_h2_dissociation_threshold_ev(lvl),
+                    std::array<double, 6>{}, mccc_path.string()
                 ));
                 built_mccc_de_v.insert(v);
-                ++synthetic_mccc_de;
+                ++added_mccc_de;
             }
 
-            if (!built_mccc_de_v.empty()) {
-                std::cout << "[AtomicData] Using MCCC H2 dissociation cross sections: "
-                          << built_mccc_de_v.size() << " levels from " << mccc_de_dir << "\n";
+            std::cout << "[AtomicData] H2 dissociation model: mccc total, "
+                      << built_mccc_de_v.size() << " levels from " << mccc_de_dir << "\n";
+            if (added_mccc_de > 0) {
+                std::cout << "[AtomicData] Added MCCC total H2 dissociation channels: "
+                          << added_mccc_de << "\n";
             }
-            if (synthetic_mccc_de > 0) {
-                std::cout << "[AtomicData] Added synthetic MCCC H2 dissociation channels: "
-                          << synthetic_mccc_de << "\n";
+        } else if (atomic_ground_index >= 0 && use_reconstructed_de) {
+            int added_reconstructed_de = 0;
+            for (const auto& lvl : raw->levels) {
+                if (!is_neutral_h2_level(lvl)) continue;
+                const int v = extract_vibrational_quantum(lvl.label);
+                if (built_reconstructed_fit_v.find(v) != built_reconstructed_fit_v.end()) continue;
+                const auto* fit = reconstructed_de_fit_table != nullptr
+                    ? reconstructed_de_fit_table->fit_for_vi(v)
+                    : nullptr;
+                if (fit == nullptr) continue;
+
+                const base::Index i_from = find_global_index(name, 0, lvl.local_index);
+                if (i_from < 0) continue;
+
+                processes_.push_back(std::make_shared<MolecularDEProcess>(
+                    i_from, atomic_ground_index, atomic_ground_index,
+                    fit->threshold_ev,
+                    std::array<double, 6>{}, std::string{}, fit->coeffs
+                ));
+                built_reconstructed_fit_v.insert(v);
+                ++added_reconstructed_de;
             }
-        } else if (!use_mccc_h2_dissociation_) {
-            if (!built_reconstructed_fit_v.empty()) {
-                std::cout << "[AtomicData] Using reconstructed H2 dissociation fits: "
-                          << built_reconstructed_fit_v.size() << " levels from "
-                          << reconstructed_de_fit_path << "\n";
-            } else {
-                std::cout << "[AtomicData] Using legacy fitted H2 dissociation rates from species file\n";
+
+            std::cout << "[AtomicData] H2 dissociation model: reconstructed total fits, "
+                      << built_reconstructed_fit_v.size() << " levels from "
+                      << reconstructed_de_fit_path << "\n";
+            if (added_reconstructed_de > 0) {
+                std::cout << "[AtomicData] Added reconstructed total H2 dissociation channels: "
+                          << added_reconstructed_de << "\n";
             }
+        } else if (atomic_ground_index >= 0 && use_janev_table_de) {
+            int added_janev_de = 0;
+            for (const auto& lvl : raw->levels) {
+                if (!is_neutral_h2_level(lvl)) continue;
+                const int v = extract_vibrational_quantum(lvl.label);
+                if (built_janev_table_v.find(v) != built_janev_table_v.end()) continue;
+                auto channels = janev_dissociation_channels(v);
+                if (channels.empty()) continue;
+
+                const base::Index i_from = find_global_index(name, 0, lvl.local_index);
+                if (i_from < 0) continue;
+
+                processes_.push_back(std::make_shared<MolecularDEProcess>(
+                    i_from, atomic_ground_index, atomic_ground_index,
+                    neutral_h2_dissociation_threshold_ev(lvl),
+                    std::array<double, 6>{}, std::string{}, std::vector<double>{},
+                    std::move(channels)
+                ));
+                built_janev_table_v.insert(v);
+                ++added_janev_de;
+            }
+
+            std::cout << "[AtomicData] H2 dissociation model: Janev/Celiberto table fits, "
+                      << built_janev_table_v.size()
+                      << " levels (2Sigma_u+ table for v=0..10, 2Sigma_g+ table/interpolation for v=0..12)\n";
+            if (added_janev_de > 0) {
+                std::cout << "[AtomicData] Added Janev/Celiberto total H2 dissociation channels: "
+                          << added_janev_de << "\n";
+            }
+        } else if (use_legacy_file_de) {
+            std::cout << "[AtomicData] H2 dissociation model: legacy species-file de channels\n";
+        } else if (use_total_h2_de) {
+            std::cout << "[AtomicData] H2 dissociation model '" << h2_dissociation_model_
+                      << "' requested but no atomic H ground state was available; no total H2 de channels added\n";
         }
     }
 

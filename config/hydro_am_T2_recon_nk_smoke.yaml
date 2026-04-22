@@ -43,4 +43,4 @@ numerics:
   marching_nk_max_restarts: 1
   marching_nk_fd_eps: 1.0e-06
   marching_nk_alpha_min: 1.0e-04
-  use_mccc_h2_dissociation: false
+  h2_dissociation_model: reconstructed

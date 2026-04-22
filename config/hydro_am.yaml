@@ -42,4 +42,4 @@ numerics:
   relaxation: 0.2
   marching_slow_iter_threshold: 1000
   marching_guess_retries: 3
-  use_mccc_h2_dissociation: true
+  h2_dissociation_model: mccc

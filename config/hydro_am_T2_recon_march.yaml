@@ -39,4 +39,4 @@ numerics:
   max_iterations: 5000
   relaxation: 0.2
   marching_slow_iter_threshold: 100
-  use_mccc_h2_dissociation: false
+  h2_dissociation_model: reconstructed

@@ -37,7 +37,7 @@ numerics:
   tolerance: 1.0e-07
   max_iterations: 1000
   relaxation: 0.9
-  use_mccc_h2_dissociation: false
+  h2_dissociation_model: reconstructed
   boundary_solver: picard
   marching_solver: newton_krylov_ptc
   marching_max_iterations: 50

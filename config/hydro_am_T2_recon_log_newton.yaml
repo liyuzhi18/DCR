@@ -1,5 +1,5 @@
 io:
-  output_dir: output/test_run_T2eV_recon_log_newton
+  output_dir: output/test_run_T2eV_mccc_1e15_w1
   atomic_data_root: atomic_data/
   data_tables_root: data_tables/
   verbose_logging: true
@@ -34,15 +34,22 @@ wall:
   sheath_potential_drop: 4.0
   temperature_eV: 0.1
 numerics:
-  tolerance: 1.0e-06
+  tolerance: 1.0e-07
   max_iterations: 5000
   relaxation: 0.9
-  use_mccc_h2_dissociation: false
+  h2_dissociation_model: reconstructed
   boundary_solver: picard
-  marching_solver: log_newton_krylov_ptc
-  marching_tolerance: 1.0e-06
-  marching_max_iterations: 200
+  marching_solver: picard_anderson
+  marching_tolerance: 1.0e-07
+  marching_max_iterations: 1000
+  marching_guess_retries: 1
+  marching_picard_warmup_iterations: 5
+  marching_picard_newton_start_rel: 1.0e-04
+  marching_picard_newton_stall_rel: 5.0e-04
   abort_on_marching_nonconvergence: true
+  marching_anderson_depth: 5
+  marching_anderson_beta: 1.0
+  marching_anderson_regularization: 1.0e-12
   marching_ptc_tau_init: 0.05
   marching_ptc_tau_max: 200.0
   marching_nk_krylov_dim: 10

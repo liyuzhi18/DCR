@@ -139,6 +139,12 @@ namespace dcr::io {
                 root["numerics"]["marching_slow_iter_threshold"].as<int>(100);
             config.numerics.marching_guess_retries =
                 root["numerics"]["marching_guess_retries"].as<int>(3);
+            config.numerics.marching_picard_warmup_iterations =
+                root["numerics"]["marching_picard_warmup_iterations"].as<int>(5);
+            config.numerics.marching_picard_newton_start_rel =
+                root["numerics"]["marching_picard_newton_start_rel"].as<base::Real>(1e-4);
+            config.numerics.marching_picard_newton_stall_rel =
+                root["numerics"]["marching_picard_newton_stall_rel"].as<base::Real>(5e-4);
             config.numerics.abort_on_marching_nonconvergence =
                 root["numerics"]["abort_on_marching_nonconvergence"].as<bool>(false);
             config.numerics.boundary_ptc_tau_init =
@@ -165,6 +171,12 @@ namespace dcr::io {
                 root["numerics"]["marching_nk_fd_eps"].as<base::Real>(1e-6);
             config.numerics.marching_nk_alpha_min =
                 root["numerics"]["marching_nk_alpha_min"].as<base::Real>(1e-4);
+            config.numerics.marching_anderson_depth =
+                root["numerics"]["marching_anderson_depth"].as<int>(5);
+            config.numerics.marching_anderson_beta =
+                root["numerics"]["marching_anderson_beta"].as<base::Real>(1.0);
+            config.numerics.marching_anderson_regularization =
+                root["numerics"]["marching_anderson_regularization"].as<base::Real>(1e-12);
             config.numerics.marching_h2_floor_fraction =
                 root["numerics"]["marching_h2_floor_fraction"].as<base::Real>(0.0);
             config.numerics.couple_flowA_retained =
@@ -173,8 +185,8 @@ namespace dcr::io {
                 root["numerics"]["qss_exclude_molecular_ion_from_transient_reconstruction"].as<bool>(false);
             config.numerics.disable_h2plus_dr =
                 root["numerics"]["disable_h2plus_dr"].as<bool>(false);
-            config.numerics.use_mccc_h2_dissociation =
-                root["numerics"]["use_mccc_h2_dissociation"].as<bool>(true);
+            config.numerics.h2_dissociation_model =
+                root["numerics"]["h2_dissociation_model"].as<std::string>("");
         }
 
         return config;
