@@ -45,6 +45,12 @@ struct BackgroundSolveResult {
     double linear_residual_norm = std::numeric_limits<double>::quiet_NaN();
     double linear_mse = std::numeric_limits<double>::quiet_NaN();
     double linear_mse_rel = std::numeric_limits<double>::quiet_NaN();
+    double w_local = std::numeric_limits<double>::quiet_NaN();
+    double source_nuclei_from_S = std::numeric_limits<double>::quiet_NaN();
+    double gamma_ex_a_over_w = std::numeric_limits<double>::quiet_NaN();
+    double gamma_ex_m_over_w = std::numeric_limits<double>::quiet_NaN();
+    double L_I = std::numeric_limits<double>::quiet_NaN();
+    double ion_balance_coeff = std::numeric_limits<double>::quiet_NaN();
 };
 
 struct MarchingMapEvaluation {
@@ -84,13 +90,6 @@ std::string format_elapsed_seconds(double seconds) {
     out << std::fixed << std::setprecision(3) << seconds;
     return out.str();
 }
-
-void enforce_neutral_molecule_floor(
-    dcr::base::Vector& nP,
-    const dcr::base::Vector& nP_ref,
-    const BoundaryPhaseResult& boundary,
-    const std::vector<dcr::atomic::EnergyLevel>& levels,
-    double floor_fraction);
 
 double group_sum(const dcr::base::Vector& full,
                  const std::vector<int>& indices) {
@@ -218,9 +217,19 @@ BackgroundSolveResult solve_background_at_cell(
     // Local background exhaust only (no flow exhaust in local solve).
     const double Gamma_ex_a_over_w = (c_s_A / w_local) * n_a;
     const double Gamma_ex_m_over_w = (c_s_M / w_local) * n_m;
+    // Ion-flux divergence balances recycling source against local background
+    // neutral exhaust. Recycled-flow exhaust (A/M) is not included here.
     const double L_I = source_nuclei_from_S - (Gamma_ex_a_over_w + mu_M * Gamma_ex_m_over_w);
     const double L_a = Gamma_ex_a_over_w;
     const double L_m = Gamma_ex_m_over_w;
+    result.w_local = w_local;
+    result.source_nuclei_from_S = source_nuclei_from_S;
+    result.gamma_ex_a_over_w = Gamma_ex_a_over_w;
+    result.gamma_ex_m_over_w = Gamma_ex_m_over_w;
+    result.L_I = L_I;
+    result.ion_balance_coeff = (n_I > 0.0)
+        ? (L_I / n_I)
+        : std::numeric_limits<double>::quiet_NaN();
 
     dcr::base::Matrix A = dcr::base::Matrix::Zero(Pn, Pn);
     if (n_I > 0.0) {
@@ -294,13 +303,6 @@ BackgroundSolveResult solve_background_at_cell(
     const double now = (stoich.array() * nP_new.array()).sum();
     if (now > 0.0) {
         nP_new *= (target_bg_nuclei / now);
-        enforce_neutral_molecule_floor(
-            nP_new,
-            nP_floor_ref,
-            boundary,
-            levels,
-            config.numerics.marching_h2_floor_fraction
-        );
         result.nP_new = nP_new;
         set_original_diag(nP_new);
         return result;
@@ -350,101 +352,6 @@ double positive_sum(const dcr::base::Vector& v) {
     double s = 0.0;
     for (int i = 0; i < v.size(); ++i) s += std::max(v(i), 0.0);
     return s;
-}
-
-void enforce_neutral_molecule_floor(
-    dcr::base::Vector& nP,
-    const dcr::base::Vector& nP_ref,
-    const BoundaryPhaseResult& boundary,
-    const std::vector<dcr::atomic::EnergyLevel>& levels,
-    double floor_fraction) {
-
-    if (floor_fraction <= 0.0) return;
-    if (nP.size() == 0 || nP_ref.size() != nP.size()) return;
-
-    std::vector<int> mol_pi;
-    std::vector<int> atom_pi;
-    int molecule_ground_pi = -1;
-    const int Pn = std::min<int>(nP.size(), static_cast<int>(boundary.P_indices.size()));
-    for (int pi = 0; pi < Pn; ++pi) {
-        const int gi = boundary.P_indices[static_cast<size_t>(pi)];
-        if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
-        const auto& lvl = levels[gi];
-        if (lvl.type == dcr::atomic::SpeciesType::Molecule && lvl.charge == 0) {
-            mol_pi.push_back(pi);
-            if (gi == boundary.molecule_ground) molecule_ground_pi = pi;
-        } else if (lvl.type == dcr::atomic::SpeciesType::Atom && lvl.charge == 0) {
-            atom_pi.push_back(pi);
-        }
-    }
-    if (mol_pi.empty() || atom_pi.empty()) return;
-
-    double ref_total = 0.0;
-    double cur_total = 0.0;
-    for (int pi : mol_pi) {
-        ref_total += std::max(nP_ref(pi), 0.0);
-        cur_total += std::max(nP(pi), 0.0);
-    }
-    if (ref_total <= 0.0) return;
-
-    const double floor_total = floor_fraction * ref_total;
-    if (cur_total >= floor_total) return;
-
-    double available_atom_nuclei = 0.0;
-    for (int pi : atom_pi) {
-        const int gi = boundary.P_indices[static_cast<size_t>(pi)];
-        available_atom_nuclei +=
-            levels[gi].atomicity * std::max(nP(pi), 0.0);
-    }
-    if (available_atom_nuclei <= 0.0) return;
-
-    const double molecule_atomicity = 2.0;
-    const double delta_total =
-        std::min(floor_total - cur_total, available_atom_nuclei / molecule_atomicity);
-    if (delta_total <= 0.0) return;
-
-    dcr::base::Vector weights = dcr::base::Vector::Zero(static_cast<int>(mol_pi.size()));
-    double weight_sum = 0.0;
-    for (int k = 0; k < static_cast<int>(mol_pi.size()); ++k) {
-        weights(k) = std::max(nP_ref(mol_pi[static_cast<size_t>(k)]), 0.0);
-        weight_sum += weights(k);
-    }
-    if (weight_sum <= 0.0 && cur_total > 0.0) {
-        for (int k = 0; k < static_cast<int>(mol_pi.size()); ++k) {
-            weights(k) = std::max(nP(mol_pi[static_cast<size_t>(k)]), 0.0);
-            weight_sum += weights(k);
-        }
-    }
-    if (weight_sum <= 0.0) {
-        if (molecule_ground_pi >= 0) {
-            for (int k = 0; k < static_cast<int>(mol_pi.size()); ++k) {
-                if (mol_pi[static_cast<size_t>(k)] == molecule_ground_pi) {
-                    weights(k) = 1.0;
-                    weight_sum = 1.0;
-                    break;
-                }
-            }
-        } else {
-            weights.setOnes();
-            weight_sum = static_cast<double>(weights.size());
-        }
-    }
-
-    double added_nuclei = 0.0;
-    for (int k = 0; k < static_cast<int>(mol_pi.size()); ++k) {
-        const int pi = mol_pi[static_cast<size_t>(k)];
-        const int gi = boundary.P_indices[static_cast<size_t>(pi)];
-        const double add = delta_total * weights(k) / weight_sum;
-        nP(pi) += add;
-        added_nuclei += levels[gi].atomicity * add;
-    }
-
-    for (int pi : atom_pi) {
-        const int gi = boundary.P_indices[static_cast<size_t>(pi)];
-        const double nuclei_here = levels[gi].atomicity * std::max(nP(pi), 0.0);
-        const double nuclei_take = added_nuclei * nuclei_here / available_atom_nuclei;
-        nP(pi) = std::max(0.0, nP(pi) - nuclei_take / levels[gi].atomicity);
-    }
 }
 
 double fraction_to_boundary_alpha(const dcr::base::Vector& x,
@@ -630,12 +537,22 @@ CellImplicitResult solve_cell_implicit(
         if (nM_size > 0) nM = x.segment(nP_size + nA_size, nM_size);
     };
 
+    auto signed_bg_nuclei = [&](const dcr::base::Vector& nP_state) {
+        double s = 0.0;
+        for (int i = 0; i < nP_state.size() &&
+                        i < static_cast<int>(boundary.P_indices.size()); ++i) {
+            const int gi = boundary.P_indices[static_cast<size_t>(i)];
+            if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
+            s += levels[gi].atomicity * nP_state(i);
+        }
+        return s;
+    };
+
     auto project_state = [&](const dcr::base::Vector& x_in) {
         dcr::base::Vector nP_proj = nP_iter;
         dcr::base::Vector flowA_proj = flowA_iter;
         dcr::base::Vector flowM_proj = flowM_iter;
         unpack_state(x_in, nP_proj, flowA_proj, flowM_proj);
-        nP_proj = nP_proj.cwiseMax(0.0);
         flowA_proj = flowA_proj.cwiseMax(0.0);
         flowM_proj = flowM_proj.cwiseMax(0.0);
 
@@ -645,19 +562,12 @@ CellImplicitResult solve_cell_implicit(
         const double target_bg_nuclei =
             std::max(0.0, config.plasma.total_density - flow_nuclei);
         const double bg_nuclei_now =
-            nuclei_sum_background(nP_proj, boundary, levels);
+            signed_bg_nuclei(nP_proj);
         if (target_bg_nuclei <= 0.0) {
             nP_proj.setZero();
-        } else if (bg_nuclei_now > 0.0) {
+        } else if (std::abs(bg_nuclei_now) > 0.0) {
             nP_proj *= (target_bg_nuclei / bg_nuclei_now);
         }
-        enforce_neutral_molecule_floor(
-            nP_proj,
-            nP_old,
-            boundary,
-            levels,
-            config.numerics.marching_h2_floor_fraction
-        );
         return pack_state(nP_proj, flowA_proj, flowM_proj);
     };
 
@@ -735,9 +645,20 @@ CellImplicitResult solve_cell_implicit(
                                bool converged,
                                double final_rel,
                                double final_resid_rel) {
-        result.nP_new = nP_final;
-        result.flowA_new = flowA_final;
-        result.flowM_new = flowM_final;
+        result.nP_new = nP_final.cwiseMax(0.0);
+        result.flowA_new = flowA_final.cwiseMax(0.0);
+        result.flowM_new = flowM_final.cwiseMax(0.0);
+        const double flow_nuclei =
+            nuclei_sum(result.flowA_new, boundary.A_indices, levels) +
+            nuclei_sum(result.flowM_new, boundary.M_indices, levels);
+        const double target_bg_nuclei =
+            std::max(0.0, config.plasma.total_density - flow_nuclei);
+        const double bg_nuclei = nuclei_sum_background(result.nP_new, boundary, levels);
+        if (target_bg_nuclei <= 0.0) {
+            result.nP_new.setZero();
+        } else if (bg_nuclei > 0.0) {
+            result.nP_new *= (target_bg_nuclei / bg_nuclei);
+        }
         result.iterations = iterations;
         result.converged = converged;
         const dcr::base::Vector bg_full =
@@ -864,10 +785,17 @@ CellImplicitResult solve_cell_implicit(
                           << " rel_np=" << eval.rel_np
                           << " rel_a=" << eval.rel_a
                           << " rel_m=" << eval.rel_m
-                          << " ||F||=" << eval.residual.norm()
-                          << " resid_rel(diag)=" << eval.resid_rel
-                          << " tau=" << tau
-                          << " bg{H+=" << bg_iter.H_plus
+	                          << " ||F||=" << eval.residual.norm()
+	                          << " resid_rel(diag)=" << eval.resid_rel
+	                          << " tau=" << tau
+	                          << " balance{w=" << eval.bg_solve.w_local
+	                          << ", S_nuc=" << eval.bg_solve.source_nuclei_from_S
+	                          << ", exA=" << eval.bg_solve.gamma_ex_a_over_w
+	                          << ", exM=" << eval.bg_solve.gamma_ex_m_over_w
+	                          << ", L_I=" << eval.bg_solve.L_I
+	                          << ", ion_coeff=" << eval.bg_solve.ion_balance_coeff
+	                          << "}"
+	                          << " bg{H+=" << bg_iter.H_plus
                           << ", H=" << bg_iter.H
                           << ", H2=" << bg_iter.H2
                           << ", H2+=" << bg_iter.H2_plus
@@ -920,10 +848,8 @@ CellImplicitResult solve_cell_implicit(
             }
 
             const double norm0 = std::max(1.0e-30, eval.residual.norm());
-            const double alpha_pos = fraction_to_boundary_alpha(
-                eval.x_projected, delta, 0.99
-            );
-            double alpha = std::min(1.0, alpha_pos);
+            const double alpha_pos = 1.0;
+            double alpha = 1.0;
             bool accepted = false;
             MarchingMapEvaluation accepted_eval;
             while (alpha >= alpha_min) {
@@ -941,7 +867,7 @@ CellImplicitResult solve_cell_implicit(
             if (!accepted) {
                 // Fall back to a conservative Picard-like correction if the
                 // Newton step does not provide sufficient decrease.
-                alpha = std::min(0.1, std::max(alpha_min, 0.05 * tau));
+                alpha = std::min(0.1, std::max(alpha_min, std::max(1.0e-2, 0.05 * tau)));
                 const auto trial = evaluate_map(
                     eval.x_projected + alpha * (eval.x_image - eval.x_projected)
                 );
@@ -1209,11 +1135,18 @@ CellImplicitResult solve_cell_implicit(
                       << " rel_change=" << rel
                       << " rel_np=" << rel_np
                       << " rel_a=" << rel_a
-                      << " rel_m=" << rel_m
-                      << " ||Rpp*n-(A*n-S)||=" << bg_solve.linear_residual_norm
-                      << " resid_rel(diag)=" << resid_rel
-                      << " omega=" << omega_iter
-                      << " bg{H+=" << bg_iter.H_plus
+	                      << " rel_m=" << rel_m
+	                      << " ||Rpp*n-(A*n-S)||=" << bg_solve.linear_residual_norm
+	                      << " resid_rel(diag)=" << resid_rel
+	                      << " omega=" << omega_iter
+	                      << " balance{w=" << bg_solve.w_local
+	                      << ", S_nuc=" << bg_solve.source_nuclei_from_S
+	                      << ", exA=" << bg_solve.gamma_ex_a_over_w
+	                      << ", exM=" << bg_solve.gamma_ex_m_over_w
+	                      << ", L_I=" << bg_solve.L_I
+	                      << ", ion_coeff=" << bg_solve.ion_balance_coeff
+	                      << "}"
+	                      << " bg{H+=" << bg_iter.H_plus
                       << ", H=" << bg_iter.H
                       << ", H2=" << bg_iter.H2
                       << ", H2+=" << bg_iter.H2_plus

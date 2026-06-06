@@ -34,6 +34,7 @@ except ImportError as exc:  # pragma: no cover
 
 try:
     import matplotlib as mpl
+    mpl.use("Agg")
     import matplotlib.pyplot as plt
 except ImportError as exc:  # pragma: no cover
     raise SystemExit("Missing dependency: matplotlib (pip install matplotlib)") from exc
@@ -60,6 +61,14 @@ class DCRData:
     qss_flow_transient_atomic: Optional[np.ndarray] = None
     qss_local_transient_atomic_indices: Optional[np.ndarray] = None
     qss_flow_transient_atomic_indices: Optional[np.ndarray] = None
+    electron_density_cm3: Optional[np.ndarray] = None
+    atomic_scd_cm3_s: Optional[np.ndarray] = None
+    atomic_effective_eir_rate_cm3_s: Optional[np.ndarray] = None
+    atomic_mar_h_source_rate_cm3_s: Optional[np.ndarray] = None
+    atomic_flow_h_source_rate_cm3_s: Optional[np.ndarray] = None
+    molecular_flow_ionization_rate_cm3_s: Optional[np.ndarray] = None
+    molecular_flow_charge_exchange_rate_cm3_s: Optional[np.ndarray] = None
+    molecular_flow_lhs_transport_rate_cm3_s: Optional[np.ndarray] = None
 
 
 def configure_journal_style(dpi: int, font_scale: float) -> None:
@@ -159,6 +168,38 @@ def load_hdf5(path: Path) -> DCRData:
             np.asarray(f["/states/qss_flow_transient_atomic_indices"][:], dtype=int)
             if "/states/qss_flow_transient_atomic_indices" in f else None
         )
+        electron_density_cm3 = (
+            np.asarray(f["/rates/ne_cm3"][:], dtype=float)
+            if "/rates/ne_cm3" in f else None
+        )
+        atomic_scd_cm3_s = (
+            np.asarray(f["/rates/atomic_scd_cm3_s"][:], dtype=float)
+            if "/rates/atomic_scd_cm3_s" in f else None
+        )
+        atomic_effective_eir_rate_cm3_s = (
+            np.asarray(f["/rates/atomic_effective_eir_rate_cm3_s"][:], dtype=float)
+            if "/rates/atomic_effective_eir_rate_cm3_s" in f else None
+        )
+        atomic_mar_h_source_rate_cm3_s = (
+            np.asarray(f["/rates/atomic_mar_h_source_rate_cm3_s"][:], dtype=float)
+            if "/rates/atomic_mar_h_source_rate_cm3_s" in f else None
+        )
+        atomic_flow_h_source_rate_cm3_s = (
+            np.asarray(f["/rates/atomic_flow_h_source_rate_cm3_s"][:], dtype=float)
+            if "/rates/atomic_flow_h_source_rate_cm3_s" in f else None
+        )
+        molecular_flow_ionization_rate_cm3_s = (
+            np.asarray(f["/rates/molecular_flow_ionization_rate_cm3_s"][:], dtype=float)
+            if "/rates/molecular_flow_ionization_rate_cm3_s" in f else None
+        )
+        molecular_flow_charge_exchange_rate_cm3_s = (
+            np.asarray(f["/rates/molecular_flow_charge_exchange_rate_cm3_s"][:], dtype=float)
+            if "/rates/molecular_flow_charge_exchange_rate_cm3_s" in f else None
+        )
+        molecular_flow_lhs_transport_rate_cm3_s = (
+            np.asarray(f["/rates/molecular_flow_lhs_transport_rate_cm3_s"][:], dtype=float)
+            if "/rates/molecular_flow_lhs_transport_rate_cm3_s" in f else None
+        )
 
     return DCRData(
         x_cm=x_cm,
@@ -180,6 +221,14 @@ def load_hdf5(path: Path) -> DCRData:
         qss_flow_transient_atomic=qss_flow_transient_atomic,
         qss_local_transient_atomic_indices=qss_local_transient_atomic_indices,
         qss_flow_transient_atomic_indices=qss_flow_transient_atomic_indices,
+        electron_density_cm3=electron_density_cm3,
+        atomic_scd_cm3_s=atomic_scd_cm3_s,
+        atomic_effective_eir_rate_cm3_s=atomic_effective_eir_rate_cm3_s,
+        atomic_mar_h_source_rate_cm3_s=atomic_mar_h_source_rate_cm3_s,
+        atomic_flow_h_source_rate_cm3_s=atomic_flow_h_source_rate_cm3_s,
+        molecular_flow_ionization_rate_cm3_s=molecular_flow_ionization_rate_cm3_s,
+        molecular_flow_charge_exchange_rate_cm3_s=molecular_flow_charge_exchange_rate_cm3_s,
+        molecular_flow_lhs_transport_rate_cm3_s=molecular_flow_lhs_transport_rate_cm3_s,
     )
 
 
@@ -208,6 +257,26 @@ def state_atomicity(data: DCRData, gi: int) -> float:
         if "h2_" in lab or "h2p_" in lab:
             return 2.0
     return 1.0
+
+
+def atomic_neutral_ground_index(data: DCRData) -> int:
+    candidates: List[int] = []
+    if data.type_id is not None and data.charge is not None and data.atomicity is not None:
+        n = min(data.type_id.size, data.charge.size, data.atomicity.size)
+        for gi in range(n):
+            if data.type_id[gi] == 0 and data.charge[gi] == 0 and data.atomicity[gi] == 1:
+                candidates.append(gi)
+    else:
+        for gi, label in enumerate(data.labels):
+            low = label.lower()
+            if "h_atom" in low and "barenucl" not in low:
+                candidates.append(gi)
+
+    if not candidates:
+        raise SystemExit("Could not identify neutral atomic H ground state in HDF5 metadata.")
+    if data.internal_id is not None:
+        return min(candidates, key=lambda gi: int(data.internal_id[gi]))
+    return candidates[0]
 
 
 def total_nuclei_profile(data: DCRData) -> np.ndarray:
@@ -343,11 +412,21 @@ def state_display_label(data: DCRData, gi: int, label: str, block_kind: str) -> 
 
     # M flow: vibrational molecular states.
     if data.internal_id is not None and 0 <= gi < data.internal_id.size:
-        return rf"$\mathrm{{H}}_2(v={int(data.internal_id[gi])})$"
+        return rf"$\mathrm{{H}}_2(v={max(0, int(data.internal_id[gi]) - 1)})$"
     m = re.search(r"h2_v(\d+)$", t)
     if m:
-        return rf"$\mathrm{{H}}_2(v={int(m.group(1))})$"
+        return rf"$\mathrm{{H}}_2(v={max(0, int(m.group(1)) - 1)})$"
     return r"$\mathrm{H}_2$"
+
+
+def molecular_display_v(data: DCRData, gi: int, label: str) -> Optional[int]:
+    if data.internal_id is not None and 0 <= gi < data.internal_id.size:
+        return max(0, int(data.internal_id[gi]) - 1)
+    token = label.split()[-1] if label.split() else label
+    m = re.search(r"h2_v(\d+)$", token.lower())
+    if m:
+        return max(0, int(m.group(1)) - 1)
+    return None
 
 
 def save_group_plot(data: DCRData, args: argparse.Namespace, outdir: Path) -> Path:
@@ -383,26 +462,272 @@ def save_group_plot(data: DCRData, args: argparse.Namespace, outdir: Path) -> Pa
         "H": r"$\mathrm{H}$",
         "H2": r"$\mathrm{H}_2$",
         "H2+": r"$\mathrm{H}_2^{+}$",
-        "A(H)": r"$A(\mathrm{H})$",
-        "M(H2)": r"$M(\mathrm{H}_2)$",
+        "A(H)": r"recycled flow $A(\mathrm{H})$",
+        "M(H2)": r"recycled flow $M(\mathrm{H}_2)$",
     }
 
-    fig, ax = plt.subplots(figsize=(7.2, 4.6), constrained_layout=True)
-    for key in order:
-        y = curves[key][mask]
-        y_plot = safe_log_series(y)
-        ax.plot(x_plot, y_plot, linestyle=styles[key], color=colors[key], label=legend[key])
+    fig, (ax_hi, ax_lo) = plt.subplots(
+        2,
+        1,
+        figsize=(7.2, 5.2),
+        sharex=True,
+        constrained_layout=True,
+        gridspec_kw={"height_ratios": [3.0, 1.25]},
+    )
+    for ax in (ax_hi, ax_lo):
+        for key in order:
+            y = curves[key][mask]
+            y_plot = safe_log_series(y)
+            ax.plot(x_plot, y_plot, linestyle=styles[key], color=colors[key], label=legend[key])
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.grid(True, which="major", linestyle="--", linewidth=0.5, alpha=0.35)
+        ax.grid(True, which="minor", linestyle=":", linewidth=0.4, alpha=0.25)
+
+    # Broken y-axis: hide the empty middle decade range so both abundant and
+    # trace local species are readable in the same figure.
+    ax_hi.set_ylim(5.0e-4, 2.0)
+    ax_lo.set_ylim(1.0e-10, 3.0e-8)
+    ax_hi.spines["bottom"].set_visible(False)
+    ax_lo.spines["top"].set_visible(False)
+    ax_hi.tick_params(labelbottom=False)
+    ax_lo.set_xlabel(xlabel)
+    fig.supylabel("Fractional Population")
+    ax_hi.legend(ncol=2, loc="best")
+
+    d = 0.012
+    kwargs = dict(transform=ax_hi.transAxes, color="k", clip_on=False, linewidth=0.8)
+    ax_hi.plot((-d, +d), (-d, +d), **kwargs)
+    ax_hi.plot((1 - d, 1 + d), (-d, +d), **kwargs)
+    kwargs.update(transform=ax_lo.transAxes)
+    ax_lo.plot((-d, +d), (1 - d, 1 + d), **kwargs)
+    ax_lo.plot((1 - d, 1 + d), (1 - d, 1 + d), **kwargs)
+
+    out = outdir / "bg_A_M_groups_vs_x.pdf"
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+def save_proposal_summary_plot(data: DCRData, args: argparse.Namespace, outdir: Path) -> Path:
+    x, xlabel = convert_x(data.x_cm, args.x_unit)
+    mask = positive_x_mask(x)
+    if int(np.count_nonzero(mask)) < 2:
+        raise SystemExit("Need at least two positive x points for log-x plotting.")
+    x_plot = x[mask]
+    curves = grouped_curves_fraction(data)
+
+    series = [
+        ("H+", r"local $\mathrm{H}^{+}$", "#1f77b4", "-"),
+        ("H", r"local $\mathrm{H}$", "#2ca02c", "-"),
+        ("H2+", r"local $\mathrm{H}_2^{+}$", "#d62728", "-"),
+        ("A(H)", r"recycled flow $A(\mathrm{H})$", "#4d4d4d", "--"),
+        ("M(H2)", r"recycled flow $M(\mathrm{H}_2)$", "#8c564b", "--"),
+    ]
+
+    fig, ax = plt.subplots(figsize=(6.4, 4.0), constrained_layout=True)
+    for key, label, color, style in series:
+        y_plot = safe_log_series(curves[key][mask])
+        lw = 2.3 if style == "--" else 2.0
+        ax.plot(x_plot, y_plot, linestyle=style, color=color, linewidth=lw, label=label)
 
     ax.set_xlabel(xlabel)
-    ax.set_ylabel("Fractional Population")
-    ax.set_title("Local Background Plasma Density")
+    ax.set_ylabel("Fraction of total nuclei")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.grid(True, which="major", linestyle="--", linewidth=0.5, alpha=0.32)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.35, alpha=0.18)
+    ax.legend(ncol=1, loc="center left", bbox_to_anchor=(1.02, 0.5))
+    ax.set_ylim(bottom=1.0e-3)
+
+    out = outdir / "dcr_transport_recycling_summary.pdf"
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+def save_atom_source_rates_plot(data: DCRData, args: argparse.Namespace, outdir: Path) -> Path:
+    required = [
+        data.atomic_effective_eir_rate_cm3_s,
+        data.atomic_mar_h_source_rate_cm3_s,
+        data.atomic_flow_h_source_rate_cm3_s,
+    ]
+    if any(v is None for v in required):
+        raise SystemExit(
+            "Missing atomic source-rate diagnostics in HDF5. Re-run DCR_Main after rebuilding."
+        )
+
+    x, xlabel = convert_x(data.x_cm, args.x_unit)
+    mask = positive_x_mask(x)
+    if int(np.count_nonzero(mask)) < 2:
+        raise SystemExit("Need at least two positive x points for log-x plotting.")
+
+    fig, ax = plt.subplots(figsize=(6.8, 4.3), constrained_layout=True)
+    series = [
+        (
+            data.atomic_effective_eir_rate_cm3_s,
+            r"effective EIR, $n_e\alpha_{\mathrm{eff}}n_{\mathrm{H}^{+}}$",
+            "#1f77b4",
+            "-",
+        ),
+        (
+            data.atomic_mar_h_source_rate_cm3_s,
+            r"MAR source into $\mathrm{H}$",
+            "#d62728",
+            "-",
+        ),
+        (
+            data.atomic_flow_h_source_rate_cm3_s,
+            r"recycling-flow source into $\mathrm{H}$",
+            "#4d4d4d",
+            "--",
+        ),
+    ]
+    for values, label, color, linestyle in series:
+        ax.plot(
+            x[mask],
+            safe_log_series(np.asarray(values, dtype=float)[mask]),
+            label=label,
+            color=color,
+            linestyle=linestyle,
+            linewidth=2.1,
+        )
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(r"Volumetric rate ($\mathrm{cm^{-3}\,s^{-1}}$)")
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.grid(True, which="major", linestyle="--", linewidth=0.5, alpha=0.35)
     ax.grid(True, which="minor", linestyle=":", linewidth=0.4, alpha=0.25)
-    ax.legend(ncol=2, loc="best")
+    ax.legend(loc="best")
 
-    out = outdir / "bg_A_M_groups_vs_x.pdf"
+    out = outdir / "atomic_source_rates_vs_x.pdf"
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+def save_ionization_vs_h_pump_plot(data: DCRData, args: argparse.Namespace, outdir: Path) -> Path:
+    required = [
+        data.electron_density_cm3,
+        data.atomic_scd_cm3_s,
+        data.atomic_flow_h_source_rate_cm3_s,
+    ]
+    if any(v is None for v in required):
+        raise SystemExit(
+            "Missing effective ionization coefficient, electron density, or H neutral pump diagnostics in HDF5."
+        )
+
+    h_ground_index = atomic_neutral_ground_index(data)
+    h_ground_density = np.maximum(data.background_full[:, h_ground_index], 0.0)
+    effective_ionization_rate = (
+        np.asarray(data.electron_density_cm3, dtype=float)
+        * np.asarray(data.atomic_scd_cm3_s, dtype=float)
+        * h_ground_density
+    )
+
+    x, xlabel = convert_x(data.x_cm, args.x_unit)
+    mask = positive_x_mask(x)
+    if int(np.count_nonzero(mask)) < 2:
+        raise SystemExit("Need at least two positive x points for log-x plotting.")
+
+    fig, ax = plt.subplots(figsize=(6.8, 4.3), constrained_layout=True)
+    series = [
+        (
+            effective_ionization_rate,
+            r"effective ionization, $n_e S_{\mathrm{eff}} n_{\mathrm{H}}$",
+            "#1f77b4",
+            "-",
+        ),
+        (
+            data.atomic_flow_h_source_rate_cm3_s,
+            r"neutral H pump/recycling source",
+            "#4d4d4d",
+            "--",
+        ),
+    ]
+    for values, label, color, linestyle in series:
+        ax.plot(
+            x[mask],
+            safe_log_series(np.asarray(values, dtype=float)[mask]),
+            label=label,
+            color=color,
+            linestyle=linestyle,
+            linewidth=2.1,
+        )
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(r"Volumetric rate ($\mathrm{cm^{-3}\,s^{-1}}$)")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.grid(True, which="major", linestyle="--", linewidth=0.5, alpha=0.35)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.4, alpha=0.25)
+    ax.legend(ncol=1, loc="best")
+
+    out = outdir / "effective_ionization_vs_h_neutral_pump.pdf"
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+def save_molecular_flow_rates_plot(data: DCRData, args: argparse.Namespace, outdir: Path) -> Path:
+    required = [
+        data.molecular_flow_ionization_rate_cm3_s,
+        data.molecular_flow_charge_exchange_rate_cm3_s,
+    ]
+    if any(v is None for v in required):
+        raise SystemExit(
+            "Missing molecular-flow rate diagnostics in HDF5. Re-run DCR_Main after rebuilding."
+        )
+
+    x, xlabel = convert_x(data.x_cm, args.x_unit)
+    mask = positive_x_mask(x)
+    if int(np.count_nonzero(mask)) < 2:
+        raise SystemExit("Need at least two positive x points for log-x plotting.")
+
+    fig, ax = plt.subplots(figsize=(6.8, 4.3), constrained_layout=True)
+    series = [
+        (
+            data.molecular_flow_ionization_rate_cm3_s,
+            r"molecular ionization from $M(\mathrm{H}_2)$",
+            "#d62728",
+            "-",
+        ),
+        (
+            data.molecular_flow_charge_exchange_rate_cm3_s,
+            r"molecular charge exchange from $M(\mathrm{H}_2)$",
+            "#1f77b4",
+            "--",
+        ),
+    ]
+    if data.molecular_flow_lhs_transport_rate_cm3_s is not None:
+        series.append(
+            (
+                data.molecular_flow_lhs_transport_rate_cm3_s,
+                r"$\nabla\cdot\Gamma^{\mathrm{H}_2^+}$",
+                "#4d4d4d",
+                ":",
+            )
+        )
+    for values, label, color, linestyle in series:
+        ax.plot(
+            x[mask],
+            safe_log_series(np.asarray(values, dtype=float)[mask]),
+            label=label,
+            color=color,
+            linestyle=linestyle,
+            linewidth=2.1,
+        )
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(r"Volumetric rate ($\mathrm{cm^{-3}\,s^{-1}}$)")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.grid(True, which="major", linestyle="--", linewidth=0.5, alpha=0.35)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.4, alpha=0.25)
+    ax.legend(loc="best")
+
+    out = outdir / "molecular_flow_ion_sources_vs_x.pdf"
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     return out
@@ -431,13 +756,24 @@ def save_flow_detail_plot(
     matrix = matrix[mask, :]
 
     m_sel, l_sel = matrix, labels
+    idx_sel = state_indices
+    if flow_kind == "M":
+        wanted_v = {0, 1, 2, 3, 4, 5, 10, 14}
+        keep = [
+            j for j, gi in enumerate(state_indices)
+            if molecular_display_v(data, gi, labels[j]) in wanted_v
+        ]
+        m_sel = matrix[:, keep]
+        l_sel = [labels[j] for j in keep]
+        idx_sel = [state_indices[j] for j in keep]
+
     fig, ax = plt.subplots(figsize=(7.6, 5.0), constrained_layout=True)
 
     cmap = plt.get_cmap("tab20")
     for j in range(m_sel.shape[1]):
         y = np.maximum(m_sel[:, j], 0.0)
         y_plot = safe_log_series(y)
-        gi = state_indices[j] if j < len(state_indices) else -1
+        gi = idx_sel[j] if j < len(idx_sel) else -1
         ax.plot(
             x_plot,
             y_plot,
@@ -447,7 +783,6 @@ def save_flow_detail_plot(
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    ax.set_title(title)
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.grid(True, which="major", linestyle="--", linewidth=0.5, alpha=0.35)
@@ -520,6 +855,26 @@ def prepare_background_matrix_and_labels_fraction(
 
 def run_groups(data: DCRData, args: argparse.Namespace, outdir: Path) -> List[Path]:
     out = save_group_plot(data, args, outdir)
+    return [out]
+
+
+def run_proposal_summary(data: DCRData, args: argparse.Namespace, outdir: Path) -> List[Path]:
+    out = save_proposal_summary_plot(data, args, outdir)
+    return [out]
+
+
+def run_atom_source_rates(data: DCRData, args: argparse.Namespace, outdir: Path) -> List[Path]:
+    out = save_atom_source_rates_plot(data, args, outdir)
+    return [out]
+
+
+def run_ionization_vs_h_pump(data: DCRData, args: argparse.Namespace, outdir: Path) -> List[Path]:
+    out = save_ionization_vs_h_pump_plot(data, args, outdir)
+    return [out]
+
+
+def run_molecular_flow_rates(data: DCRData, args: argparse.Namespace, outdir: Path) -> List[Path]:
+    out = save_molecular_flow_rates_plot(data, args, outdir)
     return [out]
 
 
@@ -626,6 +981,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_groups = sub.add_parser("groups", help="Plot grouped background and flow totals vs x")
     add_common_options(p_groups)
 
+    p_proposal = sub.add_parser("proposal-summary", help="Plot a clean DCR transport/recycling summary figure")
+    add_common_options(p_proposal)
+
+    p_sources = sub.add_parser("atom-source-rates", help="Plot effective EIR, MAR, and atomic recycling-flow source rates")
+    add_common_options(p_sources)
+
+    p_ion_pump = sub.add_parser("ionization-vs-h-pump", help="Plot effective ionization against the neutral H pump rate")
+    add_common_options(p_ion_pump)
+
+    p_mol_flow = sub.add_parser("molecular-flow-rates", help="Plot molecular-flow ionization and charge-exchange ion sources")
+    add_common_options(p_mol_flow)
+
     p_flow = sub.add_parser("flow-detail", help="Plot detailed flow-state evolution vs x")
     add_common_options(p_flow)
 
@@ -654,12 +1021,22 @@ def main() -> int:
     written: List[Path] = []
     if args.command == "groups":
         written.extend(run_groups(data, args, outdir))
+    elif args.command == "proposal-summary":
+        written.extend(run_proposal_summary(data, args, outdir))
+    elif args.command == "atom-source-rates":
+        written.extend(run_atom_source_rates(data, args, outdir))
+    elif args.command == "ionization-vs-h-pump":
+        written.extend(run_ionization_vs_h_pump(data, args, outdir))
+    elif args.command == "molecular-flow-rates":
+        written.extend(run_molecular_flow_rates(data, args, outdir))
     elif args.command == "flow-detail":
         written.extend(run_flow_detail(data, args, outdir))
     elif args.command == "background-detail":
         written.extend(run_background_detail(data, args, outdir))
     elif args.command == "all":
         written.extend(run_groups(data, args, outdir))
+        written.extend(run_atom_source_rates(data, args, outdir))
+        written.extend(run_molecular_flow_rates(data, args, outdir))
         written.extend(run_flow_detail(data, args, outdir))
         written.extend(run_background_detail(data, args, outdir))
 

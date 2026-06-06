@@ -177,8 +177,6 @@ namespace dcr::io {
                 root["numerics"]["marching_anderson_beta"].as<base::Real>(1.0);
             config.numerics.marching_anderson_regularization =
                 root["numerics"]["marching_anderson_regularization"].as<base::Real>(1e-12);
-            config.numerics.marching_h2_floor_fraction =
-                root["numerics"]["marching_h2_floor_fraction"].as<base::Real>(0.0);
             config.numerics.couple_flowA_retained =
                 root["numerics"]["couple_flowA_retained"].as<bool>(false);
             config.numerics.qss_exclude_molecular_ion_from_transient_reconstruction =

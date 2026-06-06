@@ -1,7 +1,7 @@
 io:
   # Effective atomic rates and QSS diagnostics are written to dcr_results.h5
   # under /rates for every run.
-  output_dir: output/test_run/2eV
+  output_dir: output/2eV
   atomic_data_root: atomic_data/
   data_tables_root: data_tables/
   # Keep this enabled if you want SCD/ACD and QSS summaries in the terminal log.
@@ -18,7 +18,7 @@ grid:
   num_cells: 100
   type: log
   first_cell_cm: 0.001
-  poloidal_width_cm: 100.0
+  poloidal_width_cm: 1.0
 plasma:
   total_density_cm3: 1e15
   Te_eV: 2.0
@@ -37,8 +37,8 @@ wall:
   sheath_potential_drop: 4.0
   temperature_eV: 0.1
 numerics:
-  tolerance: 1.0e-7
-  max_iterations: 500
+  tolerance: 1.0e-6
+  max_iterations: 1000
   relaxation: 0.2
   marching_slow_iter_threshold: 1000
   marching_guess_retries: 3

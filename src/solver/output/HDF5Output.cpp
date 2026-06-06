@@ -145,6 +145,38 @@ std::vector<double> build_total_nuclei_profile(
     return out;
 }
 
+std::vector<double> build_molecular_flow_lhs_transport_rate(
+    const BoundaryPhaseResult& boundary,
+    const MarchingHistory& history) {
+
+    std::vector<double> out(history.x_cm.size(), 0.0);
+    if (history.x_cm.size() < 2 || history.flowM.size() < 2 || boundary.u_M <= 0.0) return out;
+
+    auto positive_sum = [](const dcr::base::Vector& v) {
+        double total = 0.0;
+        for (int i = 0; i < v.size(); ++i) total += std::max(v(i), 0.0);
+        return total;
+    };
+
+    for (size_t k = 0; k < out.size(); ++k) {
+        size_t left = 0;
+        size_t right = 0;
+        if (k == 0) {
+            left = 0;
+            right = 1;
+        } else {
+            left = k - 1;
+            right = k;
+        }
+        if (right >= history.x_cm.size() || right >= history.flowM.size() || left >= history.flowM.size()) continue;
+        const double dx = history.x_cm[right] - history.x_cm[left];
+        if (!(dx > 0.0)) continue;
+        const double lhs = boundary.u_M * (positive_sum(history.flowM[right]) - positive_sum(history.flowM[left])) / dx;
+        out[k] = std::max(0.0, -lhs);
+    }
+    return out;
+}
+
 std::vector<double> collect_rate_scalar(
     const std::vector<RateDiagnosticSnapshot>& snapshots,
     double RateDiagnosticSnapshot::* member) {
@@ -169,6 +201,15 @@ std::vector<double> collect_atomic_qss_scalar(
     std::vector<double> out;
     out.reserve(snapshots.size());
     for (const auto& snap : snapshots) out.push_back(snap.atomic_qss.*member);
+    return out;
+}
+
+std::vector<double> collect_atomic_source_scalar(
+    const std::vector<RateDiagnosticSnapshot>& snapshots,
+    double AtomicSourceDiagnostics::* member) {
+    std::vector<double> out;
+    out.reserve(snapshots.size());
+    for (const auto& snap : snapshots) out.push_back(snap.atomic_sources.*member);
     return out;
 }
 
@@ -294,6 +335,18 @@ void write_hdf5_output(
                         collect_atomic_effective_scalar(history.rate_diagnostics, &AtomicEffectiveRates::scd_cm3_s));
     write_vector_double(file, "/rates/atomic_acd_cm3_s",
                         collect_atomic_effective_scalar(history.rate_diagnostics, &AtomicEffectiveRates::acd_cm3_s));
+    write_vector_double(file, "/rates/atomic_effective_eir_rate_cm3_s",
+                        collect_atomic_source_scalar(history.rate_diagnostics, &AtomicSourceDiagnostics::effective_eir_rate_cm3_s));
+    write_vector_double(file, "/rates/atomic_mar_h_source_rate_cm3_s",
+                        collect_atomic_source_scalar(history.rate_diagnostics, &AtomicSourceDiagnostics::mar_h_source_rate_cm3_s));
+    write_vector_double(file, "/rates/atomic_flow_h_source_rate_cm3_s",
+                        collect_atomic_source_scalar(history.rate_diagnostics, &AtomicSourceDiagnostics::flow_h_source_rate_cm3_s));
+    write_vector_double(file, "/rates/molecular_flow_ionization_rate_cm3_s",
+                        collect_atomic_source_scalar(history.rate_diagnostics, &AtomicSourceDiagnostics::molecular_flow_ionization_rate_cm3_s));
+    write_vector_double(file, "/rates/molecular_flow_charge_exchange_rate_cm3_s",
+                        collect_atomic_source_scalar(history.rate_diagnostics, &AtomicSourceDiagnostics::molecular_flow_charge_exchange_rate_cm3_s));
+    write_vector_double(file, "/rates/molecular_flow_lhs_transport_rate_cm3_s",
+                        build_molecular_flow_lhs_transport_rate(boundary, history));
     write_vector_double(file, "/rates/atomic_qss_transport_frequency_s",
                         collect_atomic_qss_scalar(history.rate_diagnostics, &AtomicQSSDiagnostics::transport_frequency_s));
     write_vector_double(file, "/rates/atomic_qss_first_excited_loss_frequency_s",

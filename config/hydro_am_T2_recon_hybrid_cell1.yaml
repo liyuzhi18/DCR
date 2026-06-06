@@ -47,4 +47,3 @@ numerics:
   marching_nk_max_restarts: 2
   marching_nk_fd_eps: 1.0e-06
   marching_nk_alpha_min: 1.0e-04
-  marching_h2_floor_fraction: 0.1

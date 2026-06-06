@@ -272,6 +272,9 @@ QSSBoundaryResult solve_qss_boundary(
             ((blocks.R_tt.rows() > 0) ? nuclei_from_source(qss_boundary, levels, blocks.transient_to_retained * source_t) : 0.0);
         const double gamma_ex_a = exA_over_w * std::max(0.0, n_a);
         const double gamma_ex_m = exM_over_w * std::max(0.0, n_m);
+        // Ion-flux divergence balances recycling source against local
+        // background neutral exhaust. Recycled-flow exhaust (A/M) is not
+        // included here.
         const double L_I = source_nuclei - (gamma_ex_a + mu_M * gamma_ex_m);
 
         dcr::base::Vector A_r_diag = build_retained_transport_diag(

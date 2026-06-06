@@ -3,9 +3,11 @@
 #include "CellSolve.hpp"
 #include "MarchingDiagnostics.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <string>
 
 namespace dcr::solver {
 
@@ -82,6 +84,21 @@ void log_rate_snapshot(double x_cm,
               << " cm SCD=" << snapshot.atomic_effective.scd_cm3_s
               << " ACD=" << snapshot.atomic_effective.acd_cm3_s
               << "\n";
+}
+
+double positive_sum(const dcr::base::Vector& v) {
+    double total = 0.0;
+    for (int i = 0; i < v.size(); ++i) total += std::max(v(i), 0.0);
+    return total;
+}
+
+double molecular_transport_loss_rate(const BoundaryPhaseResult& boundary,
+                                     const dcr::base::Vector& flowM_left,
+                                     const dcr::base::Vector& flowM_right,
+                                     double dx_cm) {
+    if (!(boundary.u_M > 0.0) || !(dx_cm > 0.0)) return 0.0;
+    const double lhs = boundary.u_M * (positive_sum(flowM_right) - positive_sum(flowM_left)) / dx_cm;
+    return std::max(0.0, -lhs);
 }
 
 } // namespace
@@ -172,7 +189,7 @@ MarchingHistory run_full_marching(
         config, atomic_data, plasma, grid, boundary, bg_full_boundary, flowA, flowM, 0.0
     );
     history.rate_diagnostics.push_back(
-        rate_calculator.evaluate(config, boundary, boundary_local, bg_full_boundary, 0.0)
+        rate_calculator.evaluate(config, boundary, boundary_local, bg_full_boundary, 0.0, plasma, grid)
     );
     if (config.io.verbose_logging) {
         log_rate_snapshot(0.0, history.rate_diagnostics.back(), levels);
@@ -185,7 +202,10 @@ MarchingHistory run_full_marching(
         const dcr::base::Vector nP_before = nP;
 
         const int cell_index = static_cast<int>(k + 1);
-        const bool detailed_log_cell = (k == 0);
+        const std::string marching_solver = config.numerics.marching_solver.empty()
+            ? "picard" : config.numerics.marching_solver;
+        const bool detailed_log_cell =
+            (k == 0) || (marching_solver.find("newton") != std::string::npos);
         const double x_left = history.x_cm[k];
         const double x_right = history.x_cm[k + 1];
         CellImplicitResult step = solve_cell_implicit(
@@ -230,8 +250,35 @@ MarchingHistory run_full_marching(
         history.background_full.push_back(bg_full);
         history.flowA.push_back(flowA);
         history.flowM.push_back(flowM);
+        const double h2plus_transport_rate = molecular_transport_loss_rate(
+            boundary,
+            flowM_before,
+            flowM,
+            dx[k]
+        );
+        if (k == 0 && !history.rate_diagnostics.empty()) {
+            history.rate_diagnostics[0] = rate_calculator.evaluate(
+                config,
+                boundary,
+                boundary_local,
+                bg_full_boundary,
+                0.0,
+                plasma,
+                grid,
+                h2plus_transport_rate
+            );
+        }
         history.rate_diagnostics.push_back(
-            rate_calculator.evaluate(config, boundary, step.local_final, bg_full, x_right)
+            rate_calculator.evaluate(
+                config,
+                boundary,
+                step.local_final,
+                bg_full,
+                x_right,
+                plasma,
+                grid,
+                h2plus_transport_rate
+            )
         );
         if (config.io.verbose_logging) {
             log_rate_snapshot(x_right, history.rate_diagnostics.back(), levels);

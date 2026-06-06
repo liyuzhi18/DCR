@@ -244,6 +244,8 @@ BackgroundSolveResult solve_background_at_cell_log(
     const double w_local = std::max(config.grid.poloidal_width_cm, 1e-12);
     const double Gamma_ex_a_over_w = (c_s_A / w_local) * n_a;
     const double Gamma_ex_m_over_w = (c_s_M / w_local) * n_m;
+    // Ion-flux divergence balances recycling source against local background
+    // neutral exhaust. Recycled-flow exhaust (A/M) is not included here.
     const double L_I = source_nuclei_from_S - (Gamma_ex_a_over_w + mu_M * Gamma_ex_m_over_w);
     const double L_a = Gamma_ex_a_over_w;
     const double L_m = Gamma_ex_m_over_w;
@@ -784,7 +786,7 @@ CellImplicitResult solve_cell_implicit_log_newton(
         }
 
         if (!accepted) {
-            alpha = std::min(0.1, std::max(alpha_min, 0.05 * tau));
+            alpha = std::min(0.1, std::max(alpha_min, std::max(1.0e-2, 0.05 * tau)));
             accepted_eval = evaluate_map(
                 eval.y_projected + alpha * (eval.y_image - eval.y_projected)
             );

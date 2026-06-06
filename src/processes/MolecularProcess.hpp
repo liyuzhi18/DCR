@@ -377,8 +377,13 @@ public:
     MolecularMIProcess(dcr::base::Index from,
                        dcr::base::Index to,
                        double threshold_ev,
-                       const std::array<double, 7>& params)
-        : from_(from), to_(to), threshold_ev_(threshold_ev), params_(params) {}
+                       const std::array<double, 7>& params,
+                       const std::array<double, 19>& branch_thresholds = {})
+        : from_(from),
+          to_(to),
+          threshold_ev_(threshold_ev),
+          params_(params),
+          branch_thresholds_(branch_thresholds) {}
 
     void apply(const dcr::state::PlasmaState& plasma,
                const EEDFGridView& grid,
@@ -390,10 +395,6 @@ public:
         if (from_ < 0 || to_ < 0) return;
         if (!grid.valid()) return;
 
-        const double k = integrate(grid);
-        const double r = k * plasma.electron_density_cm3();
-        if (r <= 0.0) return;
-
         // Franck-Condon-like branching over H2+ vibrational ladder (v'=0..18).
         const int n_rows = static_cast<int>(R.rows());
         for (size_t i = 0; i < MI_FRACTIONS.size(); ++i) {
@@ -402,15 +403,20 @@ public:
             const double frac = MI_FRACTIONS[i];
             if (frac <= 0.0) continue;
             const double weight = frac / MI_FRAC_NORMALISATION;
+            const double threshold = (branch_thresholds_[i] > 0.0)
+                ? branch_thresholds_[i]
+                : threshold_ev_;
+            const double r = integrate(grid, threshold) * plasma.electron_density_cm3();
+            if (r <= 0.0) continue;
             R(target, from_) += r * weight;
+            R(from_, from_) -= r * weight;
         }
-        R(from_, from_) -= r;
     }
 
 private:
     // Integrate ionization rate coefficient: ∫ σ(E) v(E) f(E) dE.
-    double integrate(const EEDFGridView& grid) const {
-        const double Eth = std::max(1e-6, threshold_ev_);
+    double integrate(const EEDFGridView& grid, double threshold_ev) const {
+        const double Eth = std::max(1e-6, threshold_ev);
         double acc = 0.0;
         CRM_DETAIL_ACC_GRID_LOOP_HINT
         for (size_t i = 0; i < grid.size(); ++i) {
@@ -448,6 +454,7 @@ private:
     dcr::base::Index to_ = -1;
     double threshold_ev_ = 0.0;
     std::array<double, 7> params_{};
+    std::array<double, 19> branch_thresholds_{};
 
     // Hydrogen MI branching fractions (v'=0..18), reused from legacy model.
     // Normalization is handled dynamically over available target states.
@@ -686,7 +693,8 @@ public:
                        double threshold_ev,
                        const std::array<double, 6>& params,
                        std::string mccc_table_path = {},
-                       std::vector<double> reconstructed_rate_fit_coeffs = {})
+                       std::vector<double> reconstructed_rate_fit_coeffs = {},
+                       std::vector<std::array<double, 6>> janev_rate_fits = {})
         : from_(from),
           product_a_(product_a),
           product_b_(product_b),
@@ -694,7 +702,8 @@ public:
           params_(params),
           mccc_table_path_(std::move(mccc_table_path)),
           mccc_table_(mccc_table_path_.empty() ? TabulatedCrossSection{} : load_cross_section_table(mccc_table_path_)),
-          reconstructed_rate_fit_coeffs_(std::move(reconstructed_rate_fit_coeffs)) {
+          reconstructed_rate_fit_coeffs_(std::move(reconstructed_rate_fit_coeffs)),
+          janev_rate_fits_(std::move(janev_rate_fits)) {
         if (mccc_table_.valid()) {
             for (double& sigma : mccc_table_.sigmas) {
                 sigma *= BOHR_RADIUS_CM2;
@@ -757,10 +766,21 @@ private:
             return std::exp(poly - threshold_ev_ / Te);
         }
         const double Te = std::max(Te_ev / 1000.0 * 11606.0, 1.0);
+        if (!janev_rate_fits_.empty()) {
+            double total = 0.0;
+            for (const auto& fit : janev_rate_fits_) {
+                total += rate_coefficient_from_params(Te, fit);
+            }
+            return total;
+        }
+        return rate_coefficient_from_params(Te, params_);
+    }
+
+    static double rate_coefficient_from_params(double Te, const std::array<double, 6>& params) {
         const double logTe = std::log(Te);
-        const double sum = params_[0] * std::pow(Te, -params_[1])
-                         + params_[2] * std::pow(Te, -params_[3])
-                         + params_[4] * std::exp(-params_[5] * logTe * logTe);
+        const double sum = params[0] * std::pow(Te, -params[1])
+                         + params[2] * std::pow(Te, -params[3])
+                         + params[4] * std::exp(-params[5] * logTe * logTe);
         return std::exp(sum);
     }
 
@@ -772,6 +792,7 @@ private:
     std::string mccc_table_path_;
     TabulatedCrossSection mccc_table_;
     std::vector<double> reconstructed_rate_fit_coeffs_;
+    std::vector<std::array<double, 6>> janev_rate_fits_;
 };
 
 // Molecular dissociation (ed) with electron- or ion-driven fits.

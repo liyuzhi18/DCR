@@ -144,6 +144,7 @@ LocalSystem assemble_local_system_from_background_rate_matrix(
     }
 
     const double ne_source = quasineutral_electron_density(population_for_source, levels);
+    out.population_for_source = population_for_source;
     const LocalKineticContext plasma_source(
         plasma,
         grid,
@@ -165,7 +166,7 @@ LocalSystem assemble_local_system_from_background_rate_matrix(
     redirect_h2plus_dr_products_to_ground(config, levels, R_for_S);
 
     // Build S on background rows with the same routing policy as boundary solve:
-    // I rows: IA + IM, a rows: aM only, m rows: no recycling source.
+    // I rows: IA + IM, a rows: aM only, m rows: no recycling-flow source.
     const int Pn = static_cast<int>(boundary.P_indices.size());
     out.S_background = dcr::base::Vector::Zero(Pn);
     for (int pi = 0; pi < Pn; ++pi) {

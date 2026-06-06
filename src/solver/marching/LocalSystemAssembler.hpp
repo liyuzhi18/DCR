@@ -18,6 +18,8 @@ struct BackgroundRateAssembly {
 struct LocalSystem {
     // Population vector used for process-rate evaluation at this spatial location.
     dcr::base::Vector population_for_rates;
+    // Population vector used to evaluate recycling-flow source terms.
+    dcr::base::Vector population_for_source;
     // Full collisional-radiative matrix assembled from all processes.
     dcr::base::Matrix R_full;
     // Recycling source projected on background unknowns (P block rows).

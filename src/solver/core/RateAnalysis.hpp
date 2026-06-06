@@ -35,12 +35,21 @@ struct AtomicQSSDiagnostics {
     double max_transport_to_loss_frequency_ratio = 0.0;
 };
 
+struct AtomicSourceDiagnostics {
+    double effective_eir_rate_cm3_s = 0.0;
+    double mar_h_source_rate_cm3_s = 0.0;
+    double flow_h_source_rate_cm3_s = 0.0;
+    double molecular_flow_ionization_rate_cm3_s = 0.0;
+    double molecular_flow_charge_exchange_rate_cm3_s = 0.0;
+};
+
 struct RateDiagnosticSnapshot {
     double electron_temperature_eV = 0.0;
     double ion_temperature_eV = 0.0;
     double electron_density_cm3 = 0.0;
     AtomicEffectiveRates atomic_effective;
     AtomicQSSDiagnostics atomic_qss;
+    AtomicSourceDiagnostics atomic_sources;
 };
 
 class AtomicRateCalculator {
@@ -54,7 +63,18 @@ public:
         const dcr::base::Vector& background_population,
         double x_cm) const;
 
+    RateDiagnosticSnapshot evaluate(
+        const dcr::io::Config& config,
+        const BoundaryPhaseResult& boundary,
+        const LocalSystem& local_system,
+        const dcr::base::Vector& background_population,
+        double x_cm,
+        const dcr::state::PlasmaState& plasma,
+        const EEDFGridView& grid,
+        double h2plus_transport_rate_cm3_s = 0.0) const;
+
 private:
+    const dcr::atomic::AtomicData& atomic_data_;
     const std::vector<dcr::atomic::EnergyLevel>& levels_;
     std::vector<int> atomic_subspace_indices_;
     std::vector<int> qss_excited_indices_;

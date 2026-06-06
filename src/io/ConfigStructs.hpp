@@ -136,10 +136,6 @@ namespace dcr::io {
         int marching_anderson_depth = 5;
         base::Real marching_anderson_beta = 1.0;
         base::Real marching_anderson_regularization = 1e-12;
-        // Minimum neutral-H2 background retained in marched cells, expressed as
-        // a fraction of the previous cell's neutral molecular background total.
-        // Zero disables the floor.
-        base::Real marching_h2_floor_fraction = 0.0;
         bool couple_flowA_retained = false;
         bool qss_exclude_molecular_ion_from_transient_reconstruction = false;
         // Zero out H2+(bg) -> H(n>=2) coupling in R_full to mimic ADAS-like behavior

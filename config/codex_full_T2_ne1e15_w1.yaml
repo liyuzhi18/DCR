@@ -1,5 +1,5 @@
 io:
-  output_dir: output/test_run_T2eV_mccc_1e15_w1
+  output_dir: output/full_T2_ne1e15_w1
   atomic_data_root: atomic_data/
   data_tables_root: data_tables/
   verbose_logging: true
@@ -17,9 +17,9 @@ grid:
   first_cell_cm: 0.001
   poloidal_width_cm: 1.0
 plasma:
-  total_density_cm3: 1e14
-  Te_eV: 1.0
-  Ti_eV: 1.0
+  total_density_cm3: 1e15
+  Te_eV: 2.0
+  Ti_eV: 2.0
   neutral_atom_temperature_eV: 0.1
   neutral_molecule_temperature_eV: 0.1
   initial_conditions:
@@ -39,17 +39,12 @@ numerics:
   relaxation: 0.9
   h2_dissociation_model: reconstructed
   boundary_solver: newton_krylov_ptc
+  boundary_tolerance: 1.0e-06
+  boundary_max_iterations: 300
   marching_solver: newton_krylov_ptc
   marching_tolerance: 1.0e-06
   marching_max_iterations: 1000
   marching_guess_retries: 1
-  marching_picard_warmup_iterations: 5
-  marching_picard_newton_start_rel: 1.0e-04
-  marching_picard_newton_stall_rel: 5.0e-04
-  abort_on_marching_nonconvergence: true
-  marching_anderson_depth: 5
-  marching_anderson_beta: 1.0
-  marching_anderson_regularization: 1.0e-12
   marching_ptc_tau_init: 0.05
   marching_ptc_tau_max: 200.0
   marching_nk_krylov_dim: 10

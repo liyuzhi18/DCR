@@ -78,6 +78,9 @@ int main(int argc, char** argv) {
         dcr::solver::normalize_input_roots(cfg, config_path);
         cfg.solver.mode = "full_dcr";
         cfg.io.verbose_logging = false;
+        if (argc >= 3) {
+            cfg.numerics.boundary_max_iterations = std::max(1, std::stoi(argv[2]));
+        }
 
         dcr::atomic::AtomicData atomic_data(cfg);
         const auto& levels = atomic_data.get_levels();
