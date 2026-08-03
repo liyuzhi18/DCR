@@ -448,6 +448,7 @@ def plot_rpl(
     results: List[Tuple[np.ndarray, np.ndarray, str]],  # (x_cm, p_rad, label)
     outpath: Path,
     x_unit: str = "cm",
+    x_max_cm: Optional[float] = None,
 ) -> None:
     colors = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e"]
     styles = ["-", "--", "-.", ":"]
@@ -458,6 +459,8 @@ def plot_rpl(
     for i, (x_cm, p_rad, label) in enumerate(results):
         x = x_cm * 1e-2 if x_unit == "m" else x_cm
         mask = x > 0.0
+        if x_max_cm is not None:
+            mask &= x_cm <= float(x_max_cm)
         xp = x[mask]
         yp = np.where(p_rad[mask] > 0, p_rad[mask], np.nan)
         ax.plot(xp, yp, color=colors[i % len(colors)],
@@ -481,6 +484,7 @@ def plot_rpl_components(
     results: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]],
     outpath: Path,
     x_unit: str = "cm",
+    x_max_cm: Optional[float] = None,
 ) -> None:
     """
     results: list of (x_cm, p_total, p_atomic_bg, p_atomic_flow, p_mol_bg, p_mol_flow, label)
@@ -512,6 +516,8 @@ def plot_rpl_components(
             y     = row[col_idx]
             x     = x_cm * 1e-2 if x_unit == "m" else x_cm
             mask  = x > 0.0
+            if x_max_cm is not None:
+                mask &= x_cm <= float(x_max_cm)
             xp    = x[mask]
             yp    = np.where(y[mask] > 0, y[mask], np.nan)
             ax.plot(xp, yp,
@@ -540,6 +546,7 @@ def plot_atomic_vs_molecular(
     results: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]],
     outpath: Path,
     x_unit: str = "cm",
+    x_max_cm: Optional[float] = None,
 ) -> None:
     """
     results: list of (x_cm, p_total, p_atomic_bg, p_atomic_flow, p_mol_bg, p_mol_flow, label)
@@ -558,6 +565,8 @@ def plot_atomic_vs_molecular(
         p_atomic = p_atomic_bg + p_atomic_flow
         p_molecular = p_mol_bg + p_mol_flow
         mask = x > 0.0
+        if x_max_cm is not None:
+            mask &= x_cm <= float(x_max_cm)
         xp = x[mask]
 
         ax.plot(xp, np.where(p_atomic[mask] > 0, p_atomic[mask], np.nan),
@@ -606,6 +615,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--outdir", type=Path, default=None,
                    help="Output directory (default: directory of --input)")
     p.add_argument("--x-unit", choices=["cm", "m"], default="cm")
+    p.add_argument("--x-max-cm", type=float, default=None,
+                   help="Upper x limit in cm for plotted data")
     p.add_argument("--dpi", type=int, default=300)
     p.add_argument("--font-scale", type=float, default=1.4)
     return p
@@ -678,10 +689,10 @@ def main() -> int:
         component_results.append((x2, p2, p2_bg, p2_flow, p2_lw_bg, p2_lw_flow, args.label2))
 
     outpath = outdir / "rpl_vs_x.pdf"
-    plot_rpl_components(component_results, outpath, x_unit=args.x_unit)
+    plot_rpl_components(component_results, outpath, x_unit=args.x_unit, x_max_cm=args.x_max_cm)
     if lw_path is not None:
         outpath = outdir / "rpl_atomic_vs_molecular.pdf"
-        plot_atomic_vs_molecular(component_results, outpath, x_unit=args.x_unit)
+        plot_atomic_vs_molecular(component_results, outpath, x_unit=args.x_unit, x_max_cm=args.x_max_cm)
     return 0
 
 

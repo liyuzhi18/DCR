@@ -2,15 +2,21 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 
 #include "../src/atomic/AtomicData.hpp"
 #include "../src/physics/WallBoundary.hpp"
 #include "../src/solver/boundary/BoundaryPhase.hpp"
 #include "../src/solver/marching/CellAdvance.hpp"
+#include "../src/solver/marching/CellSolve.hpp"
 #include "../src/solver/marching/LocalSystemAssembler.hpp"
 #include "TestDCRSetup.hpp"
 
 namespace {
+
+void require(bool condition, const char* message) {
+    if (!condition) throw std::runtime_error(message);
+}
 
 dcr::base::Matrix extract_block(const dcr::base::Matrix& R, const std::vector<int>& idx) {
     const int n = static_cast<int>(idx.size());
@@ -105,7 +111,7 @@ int main() {
     const double resA = implicit_residual_norm(
         R_AA,
         advanced.c_s_A,
-        cfg.grid.poloidal_width_cm,
+        cfg.grid.spatial_exhaust_width_cm,
         boundary.u_A,
         cfg.grid.length_cm,
         flowA_old,
@@ -114,7 +120,7 @@ int main() {
     const double resM = implicit_residual_norm(
         R_MM,
         advanced.c_s_M,
-        cfg.grid.poloidal_width_cm,
+        cfg.grid.spatial_exhaust_width_cm,
         boundary.u_M,
         cfg.grid.length_cm,
         flowM_old,
@@ -124,6 +130,150 @@ int main() {
     // For non-singular implicit systems, residual should be near solver tolerance.
     assert(resA < 1e-6);
     assert(resM < 1e-6);
+
+    const auto step = dcr::solver::solve_cell_implicit(
+        cfg,
+        atomic_data,
+        plasma,
+        eedf.grid,
+        boundary,
+        atomic_data.get_levels(),
+        nP,
+        flowA_old,
+        flowM_old,
+        cfg.grid.length_cm,
+        0.0,
+        cfg.grid.length_cm,
+        1,
+        false,
+        false
+    );
+    require(step.converged, "Local marching cell did not converge");
+    test_dcr::assert_all_finite_nonnegative(step.nP_new);
+
+    const auto& levels = atomic_data.get_levels();
+    const double total_nuclei =
+        test_dcr::nuclei_total_compact(step.nP_new, boundary.P_indices, levels) +
+        test_dcr::nuclei_total_compact(step.flowA_new, boundary.A_indices, levels) +
+        test_dcr::nuclei_total_compact(step.flowM_new, boundary.M_indices, levels);
+    const double density_error = std::abs(total_nuclei - cfg.plasma.total_density) /
+        std::max(1.0, cfg.plasma.total_density);
+    require(density_error < 1e-12, "Local marcher did not enforce prescribed nuclei density");
+
+    const double expected_LI = step.recycling_source_nuclei_cm3_s -
+        step.local_atom_exhaust_nuclei_cm3_s -
+        step.local_molecule_exhaust_nuclei_cm3_s;
+    const double LI_scale = std::max({1.0, std::abs(expected_LI),
+                                      std::abs(step.ion_divergence_closure_nuclei_cm3_s)});
+    require(std::isfinite(step.ion_divergence_closure_nuclei_cm3_s),
+            "Local marcher did not report a finite L_I");
+    require(std::abs(step.ion_divergence_closure_nuclei_cm3_s - expected_LI) /
+                LI_scale < 1e-12,
+            "Local marcher L_I does not satisfy nuclei conservation");
+
+    auto cfg_changed_density = cfg;
+    cfg_changed_density.plasma.total_density *= 7.0;
+    const auto step_changed_density = dcr::solver::solve_cell_implicit(
+        cfg_changed_density,
+        atomic_data,
+        plasma,
+        eedf.grid,
+        boundary,
+        levels,
+        nP,
+        flowA_old,
+        flowM_old,
+        cfg.grid.length_cm,
+        0.0,
+        cfg.grid.length_cm,
+        1,
+        false,
+        false
+    );
+    const double changed_total_nuclei =
+        test_dcr::nuclei_total_compact(step_changed_density.nP_new, boundary.P_indices, levels) +
+        test_dcr::nuclei_total_compact(step_changed_density.flowA_new, boundary.A_indices, levels) +
+        test_dcr::nuclei_total_compact(step_changed_density.flowM_new, boundary.M_indices, levels);
+    const double changed_density_error =
+        std::abs(changed_total_nuclei - cfg_changed_density.plasma.total_density) /
+        std::max(1.0, cfg_changed_density.plasma.total_density);
+    require(changed_density_error < 1e-12,
+            "Local marcher ignored the changed prescribed nuclei density");
+
+    auto cfg_ion_override = cfg;
+    cfg_ion_override.numerics.adaptive_recycling_domain.apply_ion_closure = true;
+    dcr::solver::AdaptiveTransportProfile ion_override_profile;
+    ion_override_profile.ion_divergence_nuclei_cm3_s = {0.0, 2.5e19};
+    const auto ion_override_step = dcr::solver::solve_cell_implicit(
+        cfg_ion_override,
+        atomic_data,
+        plasma,
+        eedf.grid,
+        boundary,
+        levels,
+        nP,
+        flowA_old,
+        flowM_old,
+        cfg.grid.length_cm,
+        0.0,
+        cfg.grid.length_cm,
+        1,
+        false,
+        false,
+        &ion_override_profile
+    );
+    require(std::abs(ion_override_step.ion_divergence_closure_nuclei_cm3_s + 2.5e19) /
+                2.5e19 < 1e-12,
+            "Adaptive ion-divergence override was not applied with the required sign");
+
+    for (const char* marching_solver : {"picard"}) {
+        auto cfg_variable = cfg;
+        cfg_variable.numerics.marching_solver = marching_solver;
+        cfg_variable.numerics.adaptive_recycling_domain.closure_mode =
+            "variable_nuclei_balance";
+        cfg_variable.numerics.adaptive_recycling_domain.ion_velocity_length_cm = 2.0;
+        const auto variable_step = dcr::solver::solve_cell_implicit(
+            cfg_variable,
+            atomic_data,
+            plasma,
+            eedf.grid,
+            boundary,
+            levels,
+            nP,
+            flowA_old,
+            flowM_old,
+            1.0e-3,
+            0.0,
+            1.0e-3,
+            1,
+            false,
+            false
+        );
+        require(variable_step.variable_nuclei_balance_closure,
+                "Variable nuclei closure was not selected");
+        require(variable_step.converged,
+                "Variable nuclei closure did not converge");
+        test_dcr::assert_all_finite_nonnegative(variable_step.nP_new);
+        const double variable_total_nuclei =
+            test_dcr::nuclei_total_compact(variable_step.nP_new, boundary.P_indices, levels) +
+            test_dcr::nuclei_total_compact(variable_step.flowA_new, boundary.A_indices, levels) +
+            test_dcr::nuclei_total_compact(variable_step.flowM_new, boundary.M_indices, levels);
+        const double variable_density_error =
+            std::abs(variable_total_nuclei - cfg_variable.plasma.total_density) /
+            std::max(1.0, cfg_variable.plasma.total_density);
+        require(variable_density_error > 1e-6,
+                "Variable nuclei closure was projected to the prescribed density");
+        const double variable_balance_scale = std::max({
+            1.0,
+            std::abs(variable_step.variable_ion_divergence_nuclei_cm3_s),
+            std::abs(variable_step.variable_flowA_divergence_nuclei_cm3_s),
+            std::abs(variable_step.variable_flowM_divergence_nuclei_cm3_s),
+            std::abs(variable_step.variable_neutral_exhaust_nuclei_cm3_s)
+        });
+        require(std::abs(variable_step.variable_balance_residual_cm3_s) /
+                    variable_balance_scale < 1e-10,
+                "Variable nuclei closure did not satisfy the local balance row");
+    }
 
     std::cout << "[PASS] Marching implicit one-step checks.\n";
     return 0;

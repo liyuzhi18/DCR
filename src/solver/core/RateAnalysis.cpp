@@ -163,12 +163,99 @@ bool is_molecular_charge_exchange_process(const dcr::ProcessBase& process) {
     return dynamic_cast<const crm_detail::MolecularMCXProcess*>(&process) != nullptr;
 }
 
+void accumulate_grouped_row_source(const dcr::atomic::EnergyLevel& level,
+                                   double source_rate_cm3_s,
+                                   GroupedSourceDiagnostics& out) {
+    if (source_rate_cm3_s <= 0.0) return;
+    if (level.type == dcr::atomic::SpeciesType::Ion) {
+        if (level.charge > 0) {
+            if (level.atomicity >= 2) out.H2_plus_cm3_s += source_rate_cm3_s;
+            else out.H_plus_cm3_s += source_rate_cm3_s;
+        } else if (level.charge < 0 && level.atomicity == 1) {
+            out.H_minus_cm3_s += source_rate_cm3_s;
+        }
+        return;
+    }
+    if (level.type == dcr::atomic::SpeciesType::Atom && level.charge == 0 && level.atomicity == 1) {
+        out.H_cm3_s += source_rate_cm3_s;
+        return;
+    }
+    if (level.type == dcr::atomic::SpeciesType::Molecule && level.charge == 0 && level.atomicity >= 2) {
+        out.H2_cm3_s += source_rate_cm3_s;
+    }
+}
+
+GroupedSourceDiagnostics compute_grouped_sources(const dcr::atomic::AtomicData& atomic_data,
+                                                 const dcr::state::PlasmaState& plasma,
+                                                 const EEDFGridView& grid,
+                                                 const dcr::base::Vector& population,
+                                                 const std::vector<dcr::atomic::EnergyLevel>& levels) {
+    GroupedSourceDiagnostics out;
+    if (population.size() <= 0) return out;
+    const int n = static_cast<int>(levels.size());
+    dcr::base::Matrix rates = dcr::base::Matrix::Zero(n, n);
+    for (const auto& proc : atomic_data.get_processes()) {
+        if (!proc) continue;
+        proc->apply(plasma, grid, population, rates, nullptr);
+    }
+    const int rows = std::min<int>(rates.rows(), static_cast<int>(levels.size()));
+    const int cols = std::min<int>(rates.cols(), population.size());
+    for (int row = 0; row < rows; ++row) {
+        double source = 0.0;
+        for (int col = 0; col < cols; ++col) {
+            if (row == col) continue;
+            const double term = rates(row, col) * std::max(population(col), 0.0);
+            if (term > 0.0) source += term;
+        }
+        accumulate_grouped_row_source(levels[static_cast<size_t>(row)], source, out);
+    }
+    return out;
+}
+
+void accumulate_flow_to_local_source(const dcr::atomic::EnergyLevel& level,
+                                     double source_rate_cm3_s,
+                                     FlowToLocalSourceDiagnostics& out) {
+    if (source_rate_cm3_s <= 0.0) return;
+    if (level.type == dcr::atomic::SpeciesType::Ion) {
+        if (level.charge > 0) {
+            if (level.atomicity >= 2) out.H2_plus_cm3_s += source_rate_cm3_s;
+            else out.H_plus_cm3_s += source_rate_cm3_s;
+        } else if (level.charge < 0 && level.atomicity == 1) {
+            out.H_minus_cm3_s += source_rate_cm3_s;
+        }
+        return;
+    }
+    if (level.type == dcr::atomic::SpeciesType::Atom && level.charge == 0 && level.atomicity == 1) {
+        out.H_cm3_s += source_rate_cm3_s;
+        return;
+    }
+    if (level.type == dcr::atomic::SpeciesType::Molecule && level.charge == 0 && level.atomicity >= 2) {
+        out.H2_cm3_s += source_rate_cm3_s;
+    }
+}
+
+FlowToLocalSourceDiagnostics compute_flow_to_local_sources(
+    const BoundaryPhaseResult& boundary,
+    const LocalSystem& local_system,
+    const std::vector<dcr::atomic::EnergyLevel>& levels) {
+
+    FlowToLocalSourceDiagnostics out;
+    const int n = std::min<int>(local_system.S_background.size(), static_cast<int>(boundary.P_indices.size()));
+    for (int pi = 0; pi < n; ++pi) {
+        const int gi = boundary.P_indices[static_cast<size_t>(pi)];
+        if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
+        accumulate_flow_to_local_source(levels[static_cast<size_t>(gi)], local_system.S_background(pi), out);
+    }
+    return out;
+}
+
 } // namespace
 
 AtomicRateCalculator::AtomicRateCalculator(const dcr::atomic::AtomicData& atomic_data)
     : atomic_data_(atomic_data),
       levels_(atomic_data.get_levels()),
-      atomic_global_to_subspace_(levels_.size(), -1) {
+      atomic_global_to_subspace_(levels_.size(), -1),
+      molecular_ion_global_to_subspace_(levels_.size(), -1) {
 
     double atom_ground_energy = std::numeric_limits<double>::infinity();
     double ion_ground_energy = std::numeric_limits<double>::infinity();
@@ -182,6 +269,10 @@ AtomicRateCalculator::AtomicRateCalculator(const dcr::atomic::AtomicData& atomic
         if (is_atomic_neutral_state(level) || is_positive_atomic_ion_state(level)) {
             atomic_global_to_subspace_[gi] = static_cast<int>(atomic_subspace_indices_.size());
             atomic_subspace_indices_.push_back(static_cast<int>(gi));
+        }
+        if (is_positive_molecular_ion_state(level)) {
+            molecular_ion_global_to_subspace_[gi] = static_cast<int>(molecular_ion_indices_.size());
+            molecular_ion_indices_.push_back(static_cast<int>(gi));
         }
         if (is_atomic_neutral_state(level) && level.energy_eV < atom_ground_energy) {
             atom_ground_energy = level.energy_eV;
@@ -228,6 +319,7 @@ RateDiagnosticSnapshot AtomicRateCalculator::evaluate(
 
     if (atom_ground_index_ < 0 || ion_ground_index_ < 0 || atomic_subspace_indices_.size() < 2) {
         snapshot.atomic_qss.excited_indices = qss_excited_indices_;
+        snapshot.flow_to_local_sources = compute_flow_to_local_sources(boundary, local_system, levels_);
         return snapshot;
     }
 
@@ -241,6 +333,7 @@ RateDiagnosticSnapshot AtomicRateCalculator::evaluate(
     const int i_pos = atomic_global_to_subspace_[static_cast<size_t>(ion_ground_index_)];
     if (g_pos < 0 || i_pos < 0) {
         snapshot.atomic_qss.excited_indices = qss_excited_indices_;
+        snapshot.flow_to_local_sources = compute_flow_to_local_sources(boundary, local_system, levels_);
         return snapshot;
     }
 
@@ -331,10 +424,10 @@ RateDiagnosticSnapshot AtomicRateCalculator::evaluate(
         // Use the same background atomic exhaust model used in the local solve:
         // transport frequency = c_s,A / w.
         const double c_s_A = dcr::physics::calculate_thermal_speed(
-            config.plasma.neutral_atom_temperature_eV,
+            snapshot.ion_temperature_eV,
             boundary.atom_mass_amu
         );
-        const double w_local = std::max(config.grid.poloidal_width_cm, 1e-12);
+        const double w_local = std::max(config.grid.spatial_exhaust_width_cm, 1e-12);
         qss.transport_frequency_s = c_s_A / w_local;
         qss.valid = true;
 
@@ -394,6 +487,7 @@ RateDiagnosticSnapshot AtomicRateCalculator::evaluate(
     }
 
     snapshot.atomic_qss = std::move(qss);
+    snapshot.flow_to_local_sources = compute_flow_to_local_sources(boundary, local_system, levels_);
     return snapshot;
 }
 
@@ -406,6 +500,8 @@ RateDiagnosticSnapshot AtomicRateCalculator::evaluate(
     const dcr::state::PlasmaState& plasma,
     const EEDFGridView& grid,
     double h2plus_transport_rate_cm3_s) const {
+
+    (void)h2plus_transport_rate_cm3_s;
 
     RateDiagnosticSnapshot snapshot = evaluate(
         config, boundary, local_system, background_population, x_cm
@@ -422,6 +518,130 @@ RateDiagnosticSnapshot AtomicRateCalculator::evaluate(
         snapshot.ion_temperature_eV,
         snapshot.electron_density_cm3
     );
+
+    auto accumulate_ion_nuclei_change = [&](double change_cm3_s) {
+        if (change_cm3_s > 0.0) {
+            snapshot.atomic_sources.full_ion_nuclei_source_cm3_s += change_cm3_s;
+        } else if (change_cm3_s < 0.0) {
+            snapshot.atomic_sources.full_ion_nuclei_sink_cm3_s -= change_cm3_s;
+        }
+    };
+    for (const auto& proc : atomic_data_.get_processes()) {
+        if (!proc) continue;
+        dcr::base::Matrix process_rates = dcr::base::Matrix::Zero(
+            static_cast<int>(levels_.size()), static_cast<int>(levels_.size()));
+        proc->apply(
+            plasma_local.plasma(),
+            plasma_local.grid(),
+            local_system.population_for_rates,
+            process_rates,
+            nullptr
+        );
+        const dcr::base::Vector process_change =
+            process_rates * local_system.population_for_rates;
+        double ion_nuclei_change = 0.0;
+        for (size_t gi = 0; gi < levels_.size(); ++gi) {
+            const auto& level = levels_[gi];
+            if (level.type != dcr::atomic::SpeciesType::Ion || level.charge <= 0) continue;
+            ion_nuclei_change +=
+                static_cast<double>(std::max(1, level.atomicity)) * process_change(static_cast<int>(gi));
+        }
+        accumulate_ion_nuclei_change(ion_nuclei_change);
+    }
+    for (int pi = 0; pi < local_system.S_background.size() &&
+                     pi < static_cast<int>(boundary.P_indices.size()); ++pi) {
+        const int gi = boundary.P_indices[static_cast<size_t>(pi)];
+        if (gi < 0 || gi >= static_cast<int>(levels_.size())) continue;
+        const auto& level = levels_[static_cast<size_t>(gi)];
+        if (level.type != dcr::atomic::SpeciesType::Ion || level.charge <= 0) continue;
+        accumulate_ion_nuclei_change(
+            static_cast<double>(std::max(1, level.atomicity)) * local_system.S_background(pi));
+    }
+
+    const int n_h2plus = static_cast<int>(molecular_ion_indices_.size());
+    auto& ion_transport = snapshot.molecular_ion_transport;
+    ion_transport.state_indices = molecular_ion_indices_;
+    ion_transport.mcx_production_cm3_s = dcr::base::Vector::Zero(n_h2plus);
+    ion_transport.mi_production_cm3_s = dcr::base::Vector::Zero(n_h2plus);
+    ion_transport.dr_h_source_frequency_s = dcr::base::Vector::Zero(n_h2plus);
+    ion_transport.target_velocity_cm_s = dcr::base::Vector::Zero(n_h2plus);
+
+    dcr::base::Matrix tagged_rates = dcr::base::Matrix::Zero(
+        static_cast<int>(levels_.size()), static_cast<int>(levels_.size()));
+    for (const auto& proc : atomic_data_.get_processes()) {
+        if (!proc) continue;
+        proc->apply(
+            plasma_local.plasma(),
+            plasma_local.grid(),
+            local_system.population_for_source,
+            tagged_rates,
+            nullptr
+        );
+    }
+    ion_transport.generator_s = extract_submatrix(tagged_rates, molecular_ion_indices_);
+
+    const double fixed_velocity_length_cm =
+        config.numerics.adaptive_recycling_domain.ion_velocity_length_cm;
+    const double velocity_length_cm = (fixed_velocity_length_cm > 0.0)
+        ? fixed_velocity_length_cm
+        : std::max(config.grid.length_cm, 1.0e-12);
+    const double floor_fraction = std::clamp(
+        config.numerics.adaptive_recycling_domain.ion_velocity_floor_fraction, 0.0, 1.0);
+    const double velocity_shape = std::max(floor_fraction, 1.0 - x_cm / velocity_length_cm);
+    for (int j = 0; j < n_h2plus; ++j) {
+        const int gi = molecular_ion_indices_[static_cast<size_t>(j)];
+        const double mass_amu = std::max(levels_[static_cast<size_t>(gi)].mass_amu, 1.0e-12);
+        ion_transport.target_velocity_cm_s(j) =
+            dcr::physics::calculate_Bohm_speed(
+                snapshot.electron_temperature_eV,
+                snapshot.ion_temperature_eV,
+                mass_amu
+            ) * velocity_shape;
+    }
+
+    const dcr::base::Vector& power_population =
+        (local_system.population_for_source.size() > 0)
+            ? local_system.population_for_source
+            : local_system.population_for_rates;
+    if (power_population.size() > 0) {
+        const double power_ne = std::max(
+            snapshot.electron_density_cm3,
+            quasineutral_electron_density(power_population, levels_)
+        );
+        const LocalKineticContext power_context(
+            plasma,
+            grid,
+            snapshot.electron_temperature_eV,
+            snapshot.ion_temperature_eV,
+            power_ne
+        );
+        EnergyLossAccumulator energy_loss;
+        for (const auto& proc : atomic_data_.get_processes()) {
+            if (!proc) continue;
+            proc->accumulate_energy_loss(
+                power_context.plasma(),
+                power_context.grid(),
+                power_population,
+                energy_loss
+            );
+        }
+        snapshot.power_loss.atomic_ionization_W_cm3 = energy_loss.atomic_ionization_W_cm3;
+        snapshot.power_loss.molecular_ionization_W_cm3 = energy_loss.molecular_ionization_W_cm3;
+        snapshot.power_loss.molecular_dissociation_W_cm3 = energy_loss.molecular_dissociation_W_cm3;
+        snapshot.atomic_sources.molecular_dissociation_rate_cm3_s =
+            energy_loss.molecular_dissociation_rate_cm3_s;
+        snapshot.power_loss.total_electron_inelastic_W_cm3 =
+            energy_loss.atomic_ionization_W_cm3 +
+            energy_loss.molecular_ionization_W_cm3 +
+            energy_loss.molecular_dissociation_W_cm3;
+        snapshot.grouped_sources = compute_grouped_sources(
+            atomic_data_,
+            power_context.plasma(),
+            power_context.grid(),
+            power_population,
+            levels_
+        );
+    }
 
     std::vector<double> h2plus_mcx_source_factor(levels_.size(), 0.0);
     if (local_system.population_for_source.size() > 0 && !boundary.M_indices.empty()) {
@@ -454,15 +674,37 @@ RateDiagnosticSnapshot AtomicRateCalculator::evaluate(
             if (is_mi) {
                 snapshot.atomic_sources.molecular_flow_ionization_rate_cm3_s += rate;
                 h2plus_mi_source_total += rate;
+                for (int row_pos = 0; row_pos < n_h2plus; ++row_pos) {
+                    const int row = molecular_ion_indices_[static_cast<size_t>(row_pos)];
+                    for (int col : boundary.M_indices) {
+                        if (row < 0 || row >= rates.rows() ||
+                            col < 0 || col >= rates.cols() ||
+                            col >= local_system.population_for_source.size()) continue;
+                        const double term = rates(row, col) *
+                            std::max(local_system.population_for_source(col), 0.0);
+                        if (term > 0.0) ion_transport.mi_production_cm3_s(row_pos) += term;
+                    }
+                }
             } else {
                 snapshot.atomic_sources.molecular_flow_charge_exchange_rate_cm3_s += rate;
                 h2plus_mcx_source_total += rate;
+                for (int row_pos = 0; row_pos < n_h2plus; ++row_pos) {
+                    const int row = molecular_ion_indices_[static_cast<size_t>(row_pos)];
+                    for (int col : boundary.M_indices) {
+                        if (row < 0 || row >= rates.rows() ||
+                            col < 0 || col >= rates.cols() ||
+                            col >= local_system.population_for_source.size()) continue;
+                        const double term = rates(row, col) *
+                            std::max(local_system.population_for_source(col), 0.0);
+                        if (term > 0.0) ion_transport.mcx_production_cm3_s(row_pos) += term;
+                    }
+                }
             }
         }
 
-        const double h2plus_transport = std::max(0.0, h2plus_transport_rate_cm3_s);
-        const double h2plus_total_supply =
-            h2plus_transport + h2plus_mi_source_total + h2plus_mcx_source_total;
+        // MAR branching is based only on local molecular production channels.
+        // H2+ transport is intentionally excluded from this diagnostic weight.
+        const double h2plus_total_supply = h2plus_mi_source_total + h2plus_mcx_source_total;
         const double global_mcx_source_factor = (h2plus_total_supply > 0.0)
             ? h2plus_mcx_source_total / h2plus_total_supply
             : 0.0;
@@ -488,13 +730,24 @@ RateDiagnosticSnapshot AtomicRateCalculator::evaluate(
         );
 
         if (is_molecular_dissociative_recombination_process(*proc)) {
-            snapshot.atomic_sources.mar_h_source_rate_cm3_s +=
-                sum_neutral_atomic_rows_with_column_weights(
-                    rates,
-                    local_system.population_for_rates,
-                    levels_,
-                    h2plus_mcx_source_factor
-                );
+            const double simple_dr_mar = sum_neutral_atomic_rows_with_column_weights(
+                rates,
+                local_system.population_for_rates,
+                levels_,
+                h2plus_mcx_source_factor
+            );
+            snapshot.atomic_sources.mar_h_source_rate_cm3_s += simple_dr_mar;
+            ion_transport.simple_branching_dr_mar_h_source_cm3_s += simple_dr_mar;
+            for (int col_pos = 0; col_pos < n_h2plus; ++col_pos) {
+                const int col = molecular_ion_indices_[static_cast<size_t>(col_pos)];
+                if (col < 0 || col >= rates.cols()) continue;
+                double h_source_frequency = 0.0;
+                for (int row = 0; row < rates.rows() && row < static_cast<int>(levels_.size()); ++row) {
+                    if (!is_atomic_neutral_state(levels_[static_cast<size_t>(row)])) continue;
+                    h_source_frequency += std::max(rates(row, col), 0.0);
+                }
+                ion_transport.dr_h_source_frequency_s(col_pos) += h_source_frequency;
+            }
         } else {
             snapshot.atomic_sources.mar_h_source_rate_cm3_s +=
                 sum_neutral_atomic_rows(rates, local_system.population_for_rates, levels_);

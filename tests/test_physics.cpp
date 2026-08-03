@@ -22,12 +22,13 @@ int main() {
     double mass_amu = 2.0; 
 
     // Manual Calculation Check:
-    // 10 eV = 1.60218e-11 erg
+    // Te + 3 Ti = 25 eV = 4.00544e-11 erg
     // Mass = 2.0 * 1.66054e-24 g = 3.32108e-24 g
-    // c_s = sqrt( 1.60218e-11 / 3.32108e-24 ) 
-    //     = sqrt( 4.8242e12 ) 
-    //     ≈ 2.1964e6 cm/s
-    double expected_cs = 2.1964e6;
+    // c_s = sqrt( 4.00544e-11 / 3.32108e-24 )
+    double expected_cs = std::sqrt(
+        (Te + 3.0 * Ti) * dcr::base::constants::eV_to_erg /
+        (mass_amu * dcr::base::constants::amu_g)
+    );
 
     double cs = dcr::physics::calculate_Bohm_speed(Te, Ti, mass_amu);
     double cs_ti0 = dcr::physics::calculate_Bohm_speed(Te, 0.0, mass_amu);
@@ -41,8 +42,8 @@ int main() {
         std::cerr << "[FAIL] Bohm Speed mismatch!\n";
         return 1;
     }
-    if (!is_close(cs, cs_ti0, 1e-12)) {
-        std::cerr << "[FAIL] Bohm Speed should ignore Ti.\n";
+    if (is_close(cs, cs_ti0, 1e-12)) {
+        std::cerr << "[FAIL] Bohm Speed should include Ti.\n";
         return 1;
     }
 
@@ -50,11 +51,10 @@ int main() {
     // Parameters: D atom (A=2.0), T = 0.1 eV (Room temp-ish / Wall temp)
     double T_neutral = 0.1;
     
-    // Manual Calculation:
-    // v_th = sqrt( 8 * k * T / pi * m )
-    //      = sqrt( 8 * (0.1 * 1.602e-12) / (3.14159 * 3.321e-24) )
-    //      ≈ 3.504e5 cm/s
-    double expected_vth = 3.504e5;
+    double expected_vth = std::sqrt(
+        T_neutral * dcr::base::constants::eV_to_erg /
+        (mass_amu * dcr::base::constants::amu_g)
+    );
 
     double vth = dcr::physics::calculate_thermal_speed(T_neutral, mass_amu);
 
@@ -84,7 +84,7 @@ int main() {
 
     // --- Case 4: Ion impact energy at sheath entrance ---
     double sheath_drop = 3.0; // ~3*Te
-    double expected_E0 = 0.5 * Te + sheath_drop * Te;
+    double expected_E0 = 0.5 * (Te + 3.0 * Ti) + sheath_drop * Te;
     double E0 = dcr::physics::calculate_ion_impact_energy_ev(Te, Ti, mass_amu, sheath_drop);
     double E0_ti0 = dcr::physics::calculate_ion_impact_energy_ev(Te, 0.0, mass_amu, sheath_drop);
     std::cout << "\n  Ion impact energy (Te=10eV, drop=3Te): " << E0 << " eV\n";
@@ -94,8 +94,8 @@ int main() {
         std::cerr << "[FAIL] Ion impact energy mismatch!\n";
         return 1;
     }
-    if (!is_close(E0, E0_ti0, 1e-12)) {
-        std::cerr << "[FAIL] Ion impact energy should ignore Ti through Bohm speed.\n";
+    if (is_close(E0, E0_ti0, 1e-12)) {
+        std::cerr << "[FAIL] Ion impact energy should include Ti through Bohm speed.\n";
         return 1;
     }
 

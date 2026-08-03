@@ -41,6 +41,42 @@ struct AtomicSourceDiagnostics {
     double flow_h_source_rate_cm3_s = 0.0;
     double molecular_flow_ionization_rate_cm3_s = 0.0;
     double molecular_flow_charge_exchange_rate_cm3_s = 0.0;
+    double molecular_dissociation_rate_cm3_s = 0.0;
+    double full_ion_nuclei_source_cm3_s = 0.0;
+    double full_ion_nuclei_sink_cm3_s = 0.0;
+};
+
+struct PowerLossDiagnostics {
+    double atomic_ionization_W_cm3 = 0.0;
+    double molecular_ionization_W_cm3 = 0.0;
+    double molecular_dissociation_W_cm3 = 0.0;
+    double total_electron_inelastic_W_cm3 = 0.0;
+};
+
+struct GroupedSourceDiagnostics {
+    double H_plus_cm3_s = 0.0;
+    double H_cm3_s = 0.0;
+    double H2_cm3_s = 0.0;
+    double H_minus_cm3_s = 0.0;
+    double H2_plus_cm3_s = 0.0;
+};
+
+struct FlowToLocalSourceDiagnostics {
+    double H_plus_cm3_s = 0.0;
+    double H_cm3_s = 0.0;
+    double H2_cm3_s = 0.0;
+    double H_minus_cm3_s = 0.0;
+    double H2_plus_cm3_s = 0.0;
+};
+
+struct MolecularIonTransportDiagnostics {
+    std::vector<int> state_indices;
+    dcr::base::Vector mcx_production_cm3_s;
+    dcr::base::Vector mi_production_cm3_s;
+    dcr::base::Vector dr_h_source_frequency_s;
+    dcr::base::Vector target_velocity_cm_s;
+    dcr::base::Matrix generator_s;
+    double simple_branching_dr_mar_h_source_cm3_s = 0.0;
 };
 
 struct RateDiagnosticSnapshot {
@@ -50,6 +86,10 @@ struct RateDiagnosticSnapshot {
     AtomicEffectiveRates atomic_effective;
     AtomicQSSDiagnostics atomic_qss;
     AtomicSourceDiagnostics atomic_sources;
+    PowerLossDiagnostics power_loss;
+    GroupedSourceDiagnostics grouped_sources;
+    FlowToLocalSourceDiagnostics flow_to_local_sources;
+    MolecularIonTransportDiagnostics molecular_ion_transport;
 };
 
 class AtomicRateCalculator {
@@ -78,7 +118,9 @@ private:
     const std::vector<dcr::atomic::EnergyLevel>& levels_;
     std::vector<int> atomic_subspace_indices_;
     std::vector<int> qss_excited_indices_;
+    std::vector<int> molecular_ion_indices_;
     std::vector<int> atomic_global_to_subspace_;
+    std::vector<int> molecular_ion_global_to_subspace_;
     int atom_ground_index_ = -1;
     int ion_ground_index_ = -1;
     int first_excited_index_ = -1;

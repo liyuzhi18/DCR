@@ -3,6 +3,7 @@
 #include "QSSCommon.hpp"
 
 #include "../core/RateAnalysis.hpp"
+#include "../core/TemperatureProfile.hpp"
 #include "../marching/CellAdvance.hpp"
 #include "../marching/LocalSystemAssembler.hpp"
 
@@ -167,9 +168,10 @@ QSSMarchingResult run_qss_marching(
         out_attempt.flowA = flowA_seed;
         out_attempt.flowM = flowM_seed;
 
+        const auto local_temperatures = evaluate_plasma_temperatures(config, x_right);
         const double c_s_A = dcr::physics::calculate_thermal_speed(
-            config.plasma.neutral_atom_temperature_eV, qss_boundary.boundary.atom_mass_amu);
-        const double w_local = std::max(config.grid.poloidal_width_cm, 1e-12);
+            local_temperatures.ion_eV, qss_boundary.boundary.atom_mass_amu);
+        const double w_local = std::max(config.grid.spatial_exhaust_width_cm, 1e-12);
         const double exA_over_w = c_s_A / w_local;
 
         out_attempt.rel = std::numeric_limits<double>::infinity();

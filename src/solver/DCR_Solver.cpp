@@ -4,6 +4,9 @@
 #include "core/ConfigPaths.hpp"
 #include "core/TemperatureProfile.hpp"
 #include "marching/MarchingDriver.hpp"
+#ifdef DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP
+#include "marching/GlobalBVP.hpp"
+#endif
 #include "output/HDF5Output.hpp"
 #include "qss/QSSSolver.hpp"
 
@@ -38,6 +41,14 @@ void DCR_Solver::solve() {
     const std::string config_path = resolve_config_path();
     dcr::io::Config config = dcr::io::ConfigLoader::load(config_path);
     normalize_input_roots(config, config_path);
+
+#ifndef DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP
+    if (config.solver.spatial_method == "experimental_global_bvp") {
+        throw std::runtime_error(
+            "experimental_global_bvp was requested, but this build was configured "
+            "without DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP");
+    }
+#endif
 
     if (config.grid.num_cells <= 0) {
         throw std::runtime_error("Invalid grid.num_cells in config.");
@@ -131,8 +142,35 @@ void DCR_Solver::solve() {
                 "Boundary phase did not converge; aborting before marching."
             );
         }
-        // Phase 2: full spatial marching using the converged boundary as initial condition.
-        marching_history = run_full_marching(config, atomic_data, plasma, grid, boundary);
+        // Phase 2: production uses the target-to-upstream local marcher.
+        if (config.solver.spatial_method == "experimental_global_bvp") {
+#ifdef DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP
+            const auto global = solve_global_target_conditioned_bvp(
+                config, atomic_data, plasma, grid, boundary, wall
+            );
+            if (!global.converged) {
+                throw std::runtime_error("Global target-conditioned BVP did not converge.");
+            }
+            final_boundary = global.boundary;
+            marching_history = global.history;
+#else
+            throw std::runtime_error(
+                "experimental_global_bvp was requested, but this build was configured "
+                "without DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP");
+#endif
+        } else {
+            if (config.numerics.adaptive_recycling_domain.enabled &&
+                config.numerics.adaptive_recycling_domain.closure_mode ==
+                    "variable_nuclei_balance") {
+                marching_history = run_adaptive_variable_marching(
+                    config, atomic_data, plasma, grid, boundary
+                );
+            } else {
+                marching_history = run_full_marching(
+                    config, atomic_data, plasma, grid, boundary
+                );
+            }
+        }
     }
 
     // Phase 3: persistent output for post-processing/visualization.

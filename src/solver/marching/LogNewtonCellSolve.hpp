@@ -22,6 +22,7 @@ CellImplicitResult solve_cell_implicit_log_newton(
     bool emit_summary_log,
     const dcr::base::Vector* nP_init_override = nullptr,
     const dcr::base::Vector* flowA_init_override = nullptr,
-    const dcr::base::Vector* flowM_init_override = nullptr);
+    const dcr::base::Vector* flowM_init_override = nullptr,
+    const AdaptiveTransportProfile* adaptive_profile = nullptr);
 
 } // namespace dcr::solver

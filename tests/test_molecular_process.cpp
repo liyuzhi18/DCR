@@ -160,6 +160,9 @@ int main() {
     const double r_de = R(0, 4) - before(0, 4);
     std::cout << "Molecular de: r=" << r_de << "\n";
     assert(r_de > 0.0);
+    EnergyLossAccumulator de_energy;
+    de_proc.accumulate_energy_loss(plasma, grid, population, de_energy);
+    assert(de_energy.molecular_dissociation_rate_cm3_s > 0.0);
 
     // Molecular MIDE
     auto pool = std::make_shared<crm_detail::MolecularMIDEPool>();
@@ -170,6 +173,9 @@ int main() {
     const double r_mide = R(1, 0) - before(1, 0);
     std::cout << "Molecular mide: r=" << r_mide << "\n";
     assert(r_mide > 0.0);
+    EnergyLossAccumulator mide_energy;
+    mide_proc.accumulate_energy_loss(plasma, grid, population, mide_energy);
+    assert(mide_energy.molecular_dissociation_rate_cm3_s > 0.0);
 
     std::cout << "[PASS] Molecular process checks.\n";
     return 0;

@@ -34,6 +34,13 @@ namespace dcr::io {
         // 1. Parse solver mode first so the rest of the config can stay backward compatible.
         if (root["solver"]) {
             config.solver.mode = root["solver"]["mode"].as<std::string>("full_dcr");
+            config.solver.spatial_method = root["solver"]["spatial_method"].as<std::string>(
+                "wall_to_upstream_march");
+        }
+        if (config.solver.spatial_method != "wall_to_upstream_march" &&
+            config.solver.spatial_method != "experimental_global_bvp") {
+            throw std::runtime_error(
+                "solver.spatial_method must be wall_to_upstream_march or experimental_global_bvp");
         }
 
         // 2. Parse IO Section
@@ -69,7 +76,36 @@ namespace dcr::io {
             config.grid.num_cells = g["num_cells"].as<int>();
             config.grid.type = g["type"].as<std::string>("uniform");
             config.grid.first_cell_cm = g["first_cell_cm"].as<base::Real>(0.0);
-            config.grid.poloidal_width_cm = g["poloidal_width_cm"].as<base::Real>(1.0);
+            const base::Real legacy_width_cm =
+                g["poloidal_width_cm"].as<base::Real>(1.0);
+            config.grid.boundary_poloidal_width_cm =
+                g["boundary_poloidal_width_cm"].as<base::Real>(legacy_width_cm);
+            config.grid.spatial_exhaust_width_cm =
+                g["spatial_exhaust_width_cm"].as<base::Real>(legacy_width_cm);
+        }
+        if (root["global_bvp"]) {
+            const auto global_bvp = root["global_bvp"];
+            config.global_bvp.ion_velocity_transition_length_cm =
+                global_bvp["ion_velocity_transition_length_cm"].as<base::Real>(50.0);
+            config.global_bvp.ion_upstream_speed_fraction =
+                global_bvp["ion_upstream_speed_fraction"].as<base::Real>(0.1);
+            config.global_bvp.final_domain_length_cm =
+                global_bvp["final_domain_length_cm"].as<base::Real>(50.0);
+            config.global_bvp.diagnostic_logging =
+                global_bvp["diagnostic_logging"].as<bool>(false);
+        }
+        if (!(config.global_bvp.ion_velocity_transition_length_cm > 0.0)) {
+            throw std::runtime_error(
+                "global_bvp.ion_velocity_transition_length_cm must be positive");
+        }
+        if (!(config.global_bvp.ion_upstream_speed_fraction > 0.0 &&
+              config.global_bvp.ion_upstream_speed_fraction <= 1.0)) {
+            throw std::runtime_error(
+                "global_bvp.ion_upstream_speed_fraction must be in (0, 1]");
+        }
+        if (!(config.global_bvp.final_domain_length_cm > 0.0)) {
+            throw std::runtime_error(
+                "global_bvp.final_domain_length_cm must be positive");
         }
         // 5. Parse Plasma & Initial Conditions
         if (root["plasma"]) {
@@ -126,6 +162,10 @@ namespace dcr::io {
                 root["numerics"]["boundary_tolerance"].as<base::Real>(0.0);
             config.numerics.boundary_max_iterations =
                 root["numerics"]["boundary_max_iterations"].as<int>(0);
+            config.numerics.boundary_neutral_exhaust =
+                root["numerics"]["boundary_neutral_exhaust"].as<bool>(true);
+            config.numerics.boundary_molecular_flow_acceptance =
+                root["numerics"]["boundary_molecular_flow_acceptance"].as<base::Real>(1.0);
             config.numerics.marching_tolerance =
                 root["numerics"]["marching_tolerance"].as<base::Real>(0.0);
             config.numerics.marching_max_iterations =
@@ -135,6 +175,12 @@ namespace dcr::io {
                 root["numerics"]["boundary_solver"].as<std::string>("picard");
             config.numerics.marching_solver =
                 root["numerics"]["marching_solver"].as<std::string>("picard");
+            if (config.numerics.marching_solver == "global_sparse_newton") {
+                throw std::runtime_error(
+                    "numerics.marching_solver=global_sparse_newton is no longer a production "
+                    "marcher; use solver.spatial_method=experimental_global_bvp in an "
+                    "experimental global-BVP build");
+            }
             config.numerics.marching_slow_iter_threshold =
                 root["numerics"]["marching_slow_iter_threshold"].as<int>(100);
             config.numerics.marching_guess_retries =
@@ -185,6 +231,34 @@ namespace dcr::io {
                 root["numerics"]["disable_h2plus_dr"].as<bool>(false);
             config.numerics.h2_dissociation_model =
                 root["numerics"]["h2_dissociation_model"].as<std::string>("");
+            if (root["numerics"]["adaptive_recycling_domain"]) {
+                const auto adaptive = root["numerics"]["adaptive_recycling_domain"];
+                config.numerics.adaptive_recycling_domain.enabled =
+                    adaptive["enabled"].as<bool>(false);
+                config.numerics.adaptive_recycling_domain.initial_L_box_cm =
+                    adaptive["initial_L_box_cm"].as<base::Real>(2.0);
+                config.numerics.adaptive_recycling_domain.max_L_box_cm =
+                    adaptive["max_L_box_cm"].as<base::Real>(20.0);
+                config.numerics.adaptive_recycling_domain.epsilon_A =
+                    adaptive["epsilon_A"].as<base::Real>(1e-2);
+                config.numerics.adaptive_recycling_domain.epsilon_M =
+                    adaptive["epsilon_M"].as<base::Real>(
+                        config.numerics.adaptive_recycling_domain.epsilon_A);
+                config.numerics.adaptive_recycling_domain.max_outer_iterations =
+                    adaptive["max_outer_iterations"].as<int>(5);
+                config.numerics.adaptive_recycling_domain.L1_relative_tolerance =
+                    adaptive["L1_relative_tolerance"].as<base::Real>(5e-2);
+                config.numerics.adaptive_recycling_domain.ion_velocity_length_cm =
+                    adaptive["ion_velocity_length_cm"].as<base::Real>(0.0);
+                config.numerics.adaptive_recycling_domain.ion_velocity_floor_fraction =
+                    adaptive["ion_velocity_floor_fraction"].as<base::Real>(1e-2);
+                config.numerics.adaptive_recycling_domain.neutral_partition_mode =
+                    adaptive["neutral_partition_mode"].as<std::string>("nuclei_fraction");
+                config.numerics.adaptive_recycling_domain.apply_ion_closure =
+                    adaptive["apply_ion_closure"].as<bool>(false);
+                config.numerics.adaptive_recycling_domain.closure_mode =
+                    adaptive["closure_mode"].as<std::string>("fixed_density");
+            }
         }
 
         return config;

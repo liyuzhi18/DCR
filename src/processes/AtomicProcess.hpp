@@ -331,6 +331,19 @@ public:
         }
     }
 
+    void accumulate_energy_loss(const dcr::state::PlasmaState& plasma,
+                                const EEDFGridView& grid,
+                                const Eigen::VectorXd& population,
+                                EnergyLossAccumulator& accumulator) const override {
+        if (from_ < 0 || from_ >= population.size()) return;
+        if (!grid.valid()) return;
+        const double density = std::max(population(from_), 0.0);
+        if (density <= 0.0) return;
+        const double event_rate = integrate_eii(grid) * plasma.electron_density_cm3() * density;
+        if (event_rate <= 0.0) return;
+        accumulator.atomic_ionization_W_cm3 += event_rate * std::max(threshold_ev_, 0.0) * 1.602176634e-19;
+    }
+
 private:
     using SecondaryFractionGrid = std::array<std::pair<double, double>, 159>;
 

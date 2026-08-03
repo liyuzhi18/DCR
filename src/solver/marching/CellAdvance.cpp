@@ -93,7 +93,7 @@ FlowAdvanceResult advance_recycling_flow_one_step(
     out.c_s_M = dcr::physics::calculate_thermal_speed(
         config.plasma.neutral_molecule_temperature_eV, boundary.molecule_mass_amu
     );
-    const double w = std::max(config.grid.poloidal_width_cm, 1e-12);
+    const double w = std::max(config.grid.spatial_exhaust_width_cm, 1e-12);
     // Flow exhaust terms in Eq. (1.346) marching.
     const double exA_over_w = out.c_s_A / w;
     const double exM_over_w = out.c_s_M / w;

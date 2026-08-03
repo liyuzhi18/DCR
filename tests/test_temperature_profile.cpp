@@ -44,6 +44,23 @@ int main() {
         assert(std::abs(t2.ion_eV - 1.5) < 1e-12);
     }
 
+    cfg.plasma.electron_temperature_profile.type = "constant_heat_flux";
+    cfg.plasma.electron_temperature_profile.value_start_eV = 2.0;
+    cfg.plasma.electron_temperature_profile.value_end_eV = 5.0;
+
+    {
+        const auto t0 = dcr::solver::evaluate_plasma_temperatures(cfg, -0.1);
+        const auto t1 = dcr::solver::evaluate_plasma_temperatures(cfg, 1.0);
+        const auto t2 = dcr::solver::evaluate_plasma_temperatures(cfg, 5.0);
+        const double expected_mid = std::pow(
+            0.5 * (std::pow(2.0, 3.5) + std::pow(5.0, 3.5)),
+            2.0 / 7.0
+        );
+        assert(std::abs(t0.electron_eV - 2.0) < 1e-12);
+        assert(std::abs(t1.electron_eV - expected_mid) < 1e-12);
+        assert(std::abs(t2.electron_eV - 5.0) < 1e-12);
+    }
+
     dcr::state::PlasmaState plasma(1, 1);
     std::vector<double> energies{1.0, 2.0, 3.0};
     std::vector<double> weights{1.0, 1.0, 1.0};

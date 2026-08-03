@@ -5,6 +5,7 @@
 #include "../../state/PlasmaState.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 
@@ -32,6 +33,22 @@ inline double evaluate_temperature_profile(const dcr::io::TemperatureProfileConf
         if (x_cm >= x1) return profile.value_end_eV;
         const double t = (x_cm - x0) / (x1 - x0);
         return profile.value_start_eV + t * (profile.value_end_eV - profile.value_start_eV);
+    }
+
+    if (profile.type == "constant_heat_flux") {
+        const double x0 = profile.x_start_cm;
+        const double x1 = profile.x_end_cm;
+        if (x1 <= x0) return profile.value_end_eV;
+        if (x_cm <= x0) return profile.value_start_eV;
+        if (x_cm >= x1) return profile.value_end_eV;
+        if (profile.value_start_eV < 0.0 || profile.value_end_eV < 0.0) {
+            throw std::runtime_error("constant_heat_flux temperature profile requires non-negative endpoint temperatures");
+        }
+
+        const double t = (x_cm - x0) / (x1 - x0);
+        const double t0_pow = std::pow(profile.value_start_eV, 3.5);
+        const double t1_pow = std::pow(profile.value_end_eV, 3.5);
+        return std::pow(t0_pow + t * (t1_pow - t0_pow), 2.0 / 7.0);
     }
 
     throw std::runtime_error("Unsupported temperature profile type: " + profile.type);

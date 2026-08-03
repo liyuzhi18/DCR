@@ -161,7 +161,15 @@ inline ProbRow interpolate(const ProbTable& table, double energy_ev) {
 }
 
 inline ProbRow lookup_probabilities(int v, double energy_ev) {
-    return interpolate(table_for_v(v), energy_ev);
+    ProbRow probabilities = interpolate(table_for_v(v), energy_ev);
+    double total = 0.0;
+    for (double probability : probabilities) total += std::max(probability, 0.0);
+    if (total > 0.0) {
+        for (double& probability : probabilities) {
+            probability = std::max(probability, 0.0) / total;
+        }
+    }
+    return probabilities;
 }
 
 } // namespace hydrogen_dr_tables
@@ -411,6 +419,28 @@ public:
             R(target, from_) += r * weight;
             R(from_, from_) -= r * weight;
         }
+    }
+
+    void accumulate_energy_loss(const dcr::state::PlasmaState& plasma,
+                                const EEDFGridView& grid,
+                                const Eigen::VectorXd& population,
+                                EnergyLossAccumulator& accumulator) const override {
+        if (from_ < 0 || from_ >= population.size()) return;
+        if (!grid.valid()) return;
+        const double density = std::max(population(from_), 0.0);
+        if (density <= 0.0) return;
+        double weighted_rate_energy = 0.0;
+        for (size_t i = 0; i < MI_FRACTIONS.size(); ++i) {
+            const double frac = MI_FRACTIONS[i];
+            if (frac <= 0.0) continue;
+            const double weight = frac / MI_FRAC_NORMALISATION;
+            const double threshold = (branch_thresholds_[i] > 0.0)
+                ? branch_thresholds_[i]
+                : threshold_ev_;
+            const double event_rate = integrate(grid, threshold) * plasma.electron_density_cm3() * density * weight;
+            weighted_rate_energy += event_rate * std::max(threshold, 0.0);
+        }
+        accumulator.molecular_ionization_W_cm3 += weighted_rate_energy * 1.602176634e-19;
     }
 
 private:
@@ -736,6 +766,26 @@ public:
         R(from_, from_) -= rate;
     }
 
+    void accumulate_energy_loss(const dcr::state::PlasmaState& plasma,
+                                const EEDFGridView& grid,
+                                const Eigen::VectorXd& population,
+                                EnergyLossAccumulator& accumulator) const override {
+        if (from_ < 0 || from_ >= population.size()) return;
+        const double density = std::max(population(from_), 0.0);
+        if (density <= 0.0) return;
+        double k = 0.0;
+        if (mccc_table_.valid()) {
+            if (!grid.valid()) return;
+            k = integrate(grid);
+        } else {
+            k = rate_coefficient(plasma.electron_temperature_ev());
+        }
+        const double event_rate = k * plasma.electron_density_cm3() * density;
+        if (event_rate <= 0.0) return;
+        accumulator.molecular_dissociation_rate_cm3_s += event_rate;
+        accumulator.molecular_dissociation_W_cm3 += event_rate * std::max(threshold_ev_, 0.0) * 1.602176634e-19;
+    }
+
 private:
     double integrate(const EEDFGridView& grid) const {
         double acc = 0.0;
@@ -880,6 +930,29 @@ public:
                 break;
             }
         }
+    }
+
+    std::vector<dcr::base::Index> population_dependencies() const override {
+        if (flag_ == 99) return {};
+        std::vector<dcr::base::Index> indices;
+        if (primary_ >= 0) indices.push_back(primary_);
+        if (partner_ >= 0 && partner_ != primary_) indices.push_back(partner_);
+        return indices;
+    }
+
+    void accumulate_energy_loss(const dcr::state::PlasmaState& plasma,
+                                const EEDFGridView& grid,
+                                const Eigen::VectorXd& population,
+                                EnergyLossAccumulator& accumulator) const override {
+        if (flag_ != 99) return;
+        if (primary_ < 0 || primary_ >= population.size()) return;
+        if (!grid.valid()) return;
+        const double density_primary = std::max(population(primary_), 0.0);
+        if (density_primary <= 0.0) return;
+        const double event_rate = integrate_eedf(grid) * plasma.electron_density_cm3() * density_primary;
+        if (event_rate <= 0.0) return;
+        accumulator.molecular_dissociation_rate_cm3_s += event_rate;
+        accumulator.molecular_dissociation_W_cm3 += event_rate * ED_EB * 1.602176634e-19;
     }
 
 private:
@@ -1040,6 +1113,13 @@ public:
         }
     }
 
+    std::vector<dcr::base::Index> population_dependencies() const override {
+        std::vector<dcr::base::Index> indices;
+        if (reactant_a_ >= 0) indices.push_back(reactant_a_);
+        if (reactant_b_ >= 0 && reactant_b_ != reactant_a_) indices.push_back(reactant_b_);
+        return indices;
+    }
+
 private:
     double population_density(const Eigen::VectorXd& population, int idx) const {
         if (idx < 0 || idx >= population.size()) return 0.0;
@@ -1150,6 +1230,20 @@ public:
         R(product_a_, from_) += rate;
         R(product_b_, from_) += rate;
         R(from_, from_) -= rate;
+    }
+
+    void accumulate_energy_loss(const dcr::state::PlasmaState& plasma,
+                                const EEDFGridView& grid,
+                                const Eigen::VectorXd& population,
+                                EnergyLossAccumulator& accumulator) const override {
+        if (from_ < 0 || from_ >= population.size()) return;
+        if (!grid.valid()) return;
+        const double density = std::max(population(from_), 0.0);
+        if (density <= 0.0) return;
+        const double event_rate = integrate(grid) * plasma.electron_density_cm3() * density;
+        if (event_rate <= 0.0) return;
+        accumulator.molecular_dissociation_rate_cm3_s += event_rate;
+        accumulator.molecular_dissociation_W_cm3 += event_rate * std::max(threshold_ev_, 0.0) * 1.602176634e-19;
     }
 
 private:

@@ -34,6 +34,18 @@ struct BackgroundSolveResult {
     double linear_residual_norm = std::numeric_limits<double>::quiet_NaN();
     double linear_mse = std::numeric_limits<double>::quiet_NaN();
     double linear_mse_rel = std::numeric_limits<double>::quiet_NaN();
+    bool variable_nuclei_balance_closure = false;
+    double variable_ion_divergence_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
+    double variable_flowA_divergence_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
+    double variable_flowM_divergence_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
+    double variable_neutral_exhaust_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
+    double variable_balance_rhs = std::numeric_limits<double>::quiet_NaN();
+    double variable_balance_residual = std::numeric_limits<double>::quiet_NaN();
+    double recycling_source_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
+    double local_atom_exhaust_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
+    double local_molecule_exhaust_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
+    double ion_divergence_closure_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
+    double ion_balance_coefficient_s = std::numeric_limits<double>::quiet_NaN();
 };
 
 struct LogMarchingMapEvaluation {
@@ -76,15 +88,6 @@ std::string format_elapsed_seconds(double seconds) {
     return out.str();
 }
 
-double group_sum(const dcr::base::Vector& full,
-                 const std::vector<int>& indices) {
-    double s = 0.0;
-    for (int gi : indices) {
-        if (gi >= 0 && gi < full.size()) s += std::max(full(gi), 0.0);
-    }
-    return s;
-}
-
 double nuclei_sum(const dcr::base::Vector& vec,
                   const std::vector<int>& global_indices,
                   const std::vector<dcr::atomic::EnergyLevel>& levels) {
@@ -97,17 +100,20 @@ double nuclei_sum(const dcr::base::Vector& vec,
     return s;
 }
 
-double nuclei_sum_background(const dcr::base::Vector& nP,
-                             const BoundaryPhaseResult& boundary,
-                             const std::vector<dcr::atomic::EnergyLevel>& levels) {
-    double s = 0.0;
-    const int n = std::min<int>(nP.size(), static_cast<int>(boundary.P_indices.size()));
-    for (int i = 0; i < n; ++i) {
-        const int gi = boundary.P_indices[static_cast<size_t>(i)];
-        if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
-        s += levels[gi].atomicity * std::max(nP(i), 0.0);
+double group_sum(const dcr::base::Vector& full,
+                 const std::vector<int>& indices) {
+    double sum = 0.0;
+    for (int gi : indices) {
+        if (gi >= 0 && gi < full.size()) sum += std::max(full(gi), 0.0);
     }
-    return s;
+    return sum;
+}
+
+double nuclei_sum_background(
+    const dcr::base::Vector& nP,
+    const BoundaryPhaseResult& boundary,
+    const std::vector<dcr::atomic::EnergyLevel>& levels) {
+    return nuclei_sum(nP, boundary.P_indices, levels);
 }
 
 dcr::base::Matrix extract_R_PP(const dcr::base::Matrix& R_full,
@@ -197,10 +203,21 @@ BackgroundSolveResult solve_background_at_cell_log(
     const std::vector<dcr::atomic::EnergyLevel>& levels,
     const LocalSystem& local_system,
     const dcr::base::Vector& nP_guess,
+    const dcr::base::Vector& nP_old,
+    const dcr::base::Vector& flowA_old,
+    const dcr::base::Vector& flowM_old,
     const dcr::base::Vector& flowA_new,
-    const dcr::base::Vector& flowM_new) {
+    const dcr::base::Vector& flowM_new,
+    double dx_cm,
+    double x_left_cm,
+    double x_right_cm,
+    const AdaptiveTransportProfile* adaptive_profile,
+    int adaptive_profile_node_index) {
 
     BackgroundSolveResult result;
+    const bool variable_nuclei_balance_closure =
+        config.numerics.adaptive_recycling_domain.closure_mode == "variable_nuclei_balance";
+    result.variable_nuclei_balance_closure = variable_nuclei_balance_closure;
     const int Pn = static_cast<int>(boundary.P_indices.size());
     if (Pn == 0) {
         result.nP_new = nP_guess;
@@ -213,102 +230,223 @@ BackgroundSolveResult solve_background_at_cell_log(
         if (gi >= 0 && gi < static_cast<int>(levels.size())) p_pos[static_cast<size_t>(gi)] = i;
     }
 
-    const dcr::base::Vector bg_full =
-        make_background_full(nP_guess, boundary, static_cast<int>(levels.size()));
-    double n_I = 0.0;
+    const dcr::base::Vector bg_full = make_background_full(
+        nP_guess, boundary, static_cast<int>(levels.size()));
+    double ion_nuclei_density = 0.0;
     for (int gi : boundary.ion_indices) {
         if (gi < 0 || gi >= static_cast<int>(levels.size()) || gi >= bg_full.size()) continue;
-        const double mu_i = std::max(1, levels[gi].atomicity);
-        n_I += mu_i * std::max(bg_full(gi), 0.0);
+        ion_nuclei_density += std::max(1, levels[static_cast<size_t>(gi)].atomicity) *
+            std::max(bg_full(gi), 0.0);
     }
-    const double n_a = group_sum(bg_full, boundary.atom_bg_indices);
-    const double n_m = group_sum(bg_full, boundary.mol_bg_indices);
-
-    double source_nuclei_from_S = 0.0;
-    for (int pi = 0; pi < Pn; ++pi) {
-        if (pi >= local_system.S_background.size()) break;
+    double source_nuclei = 0.0;
+    for (int pi = 0; pi < Pn && pi < local_system.S_background.size(); ++pi) {
         const int gi = boundary.P_indices[static_cast<size_t>(pi)];
-        const double mu_i = (gi >= 0 && gi < static_cast<int>(levels.size()))
-            ? static_cast<double>(std::max(1, levels[static_cast<size_t>(gi)].atomicity))
-            : 1.0;
-        source_nuclei_from_S += mu_i * local_system.S_background(pi);
+        const double atomicity = (gi >= 0 && gi < static_cast<int>(levels.size()))
+            ? std::max(1, levels[static_cast<size_t>(gi)].atomicity) : 1;
+        source_nuclei += atomicity * local_system.S_background(pi);
     }
+    const auto local_temperatures = evaluate_plasma_temperatures(config, x_right_cm);
+    const double atom_speed = dcr::physics::calculate_thermal_speed(
+        local_temperatures.ion_eV, boundary.atom_mass_amu);
+    const double flow_atom_speed = dcr::physics::calculate_thermal_speed(
+        config.plasma.neutral_atom_temperature_eV, boundary.atom_mass_amu);
+    const double molecule_speed = dcr::physics::calculate_thermal_speed(
+        config.plasma.neutral_molecule_temperature_eV, boundary.molecule_mass_amu);
+    const double width = std::max(config.grid.spatial_exhaust_width_cm, 1.0e-12);
+    auto background_exhaust = [&](const std::vector<int>& indices, double speed) {
+        double total = 0.0;
+        for (int gi : indices) {
+            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
+                ? p_pos[static_cast<size_t>(gi)] : -1;
+            if (pi < 0 || pi >= nP_guess.size() ||
+                gi >= static_cast<int>(levels.size())) continue;
+            total += std::max(1, levels[static_cast<size_t>(gi)].atomicity) *
+                speed / width * std::max(nP_guess(pi), 0.0);
+        }
+        return total;
+    };
+    const double atom_exhaust = background_exhaust(boundary.atom_bg_indices, atom_speed);
+    const double molecule_exhaust = background_exhaust(
+        boundary.mol_bg_indices, molecule_speed);
+    const double legacy_L_I = source_nuclei - atom_exhaust - molecule_exhaust;
+    double L_I_for_matrix = legacy_L_I;
+    if (config.numerics.adaptive_recycling_domain.apply_ion_closure &&
+        adaptive_profile != nullptr && adaptive_profile_node_index >= 0) {
+        const size_t node = static_cast<size_t>(adaptive_profile_node_index);
+        if (node < adaptive_profile->ion_divergence_nuclei_cm3_s.size() &&
+            std::isfinite(adaptive_profile->ion_divergence_nuclei_cm3_s[node])) {
+            L_I_for_matrix = -adaptive_profile->ion_divergence_nuclei_cm3_s[node];
+        }
+    }
+    result.recycling_source_nuclei_cm3_s = source_nuclei;
+    result.local_atom_exhaust_nuclei_cm3_s = atom_exhaust;
+    result.local_molecule_exhaust_nuclei_cm3_s = molecule_exhaust;
+    result.ion_divergence_closure_nuclei_cm3_s = L_I_for_matrix;
+    result.ion_balance_coefficient_s = ion_nuclei_density > 0.0
+        ? L_I_for_matrix / ion_nuclei_density
+        : std::numeric_limits<double>::quiet_NaN();
 
-    const double mu_M = 2.0;
-    const double c_s_A = dcr::physics::calculate_thermal_speed(
-        config.plasma.neutral_atom_temperature_eV, boundary.atom_mass_amu
-    );
-    const double c_s_M = dcr::physics::calculate_thermal_speed(
-        config.plasma.neutral_molecule_temperature_eV, boundary.molecule_mass_amu
-    );
-    const double w_local = std::max(config.grid.poloidal_width_cm, 1e-12);
-    const double Gamma_ex_a_over_w = (c_s_A / w_local) * n_a;
-    const double Gamma_ex_m_over_w = (c_s_M / w_local) * n_m;
-    // Ion-flux divergence balances recycling source against local background
-    // neutral exhaust. Recycled-flow exhaust (A/M) is not included here.
-    const double L_I = source_nuclei_from_S - (Gamma_ex_a_over_w + mu_M * Gamma_ex_m_over_w);
-    const double L_a = Gamma_ex_a_over_w;
-    const double L_m = Gamma_ex_m_over_w;
-
-    dcr::base::Matrix A = dcr::base::Matrix::Zero(Pn, Pn);
-    if (n_I > 0.0) {
+    dcr::base::Matrix loss = dcr::base::Matrix::Zero(Pn, Pn);
+    if (ion_nuclei_density > 0.0) {
         for (int gi : boundary.ion_indices) {
             const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
-                ? p_pos[static_cast<size_t>(gi)]
-                : -1;
-            if (pi >= 0 && gi >= 0 && gi < static_cast<int>(levels.size())) {
-                A(pi, pi) = L_I / n_I;
-            }
+                ? p_pos[static_cast<size_t>(gi)] : -1;
+            if (pi >= 0) loss(pi, pi) = L_I_for_matrix / ion_nuclei_density;
         }
     }
-    if (n_a > 0.0) {
-        const double coeff = L_a / n_a;
-        for (int gi : boundary.atom_bg_indices) {
-            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
-                ? p_pos[static_cast<size_t>(gi)]
-                : -1;
-            if (pi >= 0) A(pi, pi) = coeff;
-        }
+    for (int gi : boundary.atom_bg_indices) {
+        const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
+            ? p_pos[static_cast<size_t>(gi)] : -1;
+        if (pi >= 0) loss(pi, pi) = atom_speed / width;
     }
-    if (n_m > 0.0) {
-        const double coeff = L_m / n_m;
-        for (int gi : boundary.mol_bg_indices) {
-            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
-                ? p_pos[static_cast<size_t>(gi)]
-                : -1;
-            if (pi >= 0) A(pi, pi) = coeff;
-        }
+    for (int gi : boundary.mol_bg_indices) {
+        const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
+            ? p_pos[static_cast<size_t>(gi)] : -1;
+        if (pi >= 0) loss(pi, pi) = molecule_speed / width;
     }
 
     const dcr::base::Matrix Rpp = extract_R_PP(local_system.R_full, boundary.P_indices);
-    dcr::base::Matrix C = Rpp;
-    dcr::base::Vector rhs = A * nP_guess - local_system.S_background;
-    dcr::base::Vector stoich = dcr::base::Vector::Zero(Pn);
-    for (int i = 0; i < Pn; ++i) {
-        const int gi = boundary.P_indices[static_cast<size_t>(i)];
-        stoich(i) = (gi >= 0 && gi < static_cast<int>(levels.size()))
-            ? static_cast<double>(levels[gi].atomicity)
-            : 1.0;
+    dcr::base::Matrix replaced = Rpp;
+    dcr::base::Vector rhs = loss * nP_guess - local_system.S_background;
+    dcr::base::Vector atomicity = dcr::base::Vector::Ones(Pn);
+    for (int pi = 0; pi < Pn; ++pi) {
+        const int gi = boundary.P_indices[static_cast<size_t>(pi)];
+        if (gi >= 0 && gi < static_cast<int>(levels.size())) {
+            atomicity(pi) = std::max(1, levels[static_cast<size_t>(gi)].atomicity);
+        }
     }
-
-    const double flow_nuclei = nuclei_sum(flowA_new, boundary.A_indices, levels)
-                             + nuclei_sum(flowM_new, boundary.M_indices, levels);
-    const double target_bg_nuclei = std::max(0.0, config.plasma.total_density - flow_nuclei);
+    auto compact_nuclei_flux = [&](const dcr::base::Vector& flow,
+                                   const std::vector<int>& indices,
+                                   double velocity) {
+        return velocity * nuclei_sum(flow, indices, levels);
+    };
+    const double fixed_ion_velocity_length_cm =
+        config.numerics.adaptive_recycling_domain.ion_velocity_length_cm;
+    const double L1_for_ion_velocity = fixed_ion_velocity_length_cm > 0.0
+        ? fixed_ion_velocity_length_cm
+        : ((adaptive_profile != nullptr && adaptive_profile->L1_cm > 0.0)
+            ? adaptive_profile->L1_cm
+            : std::max(config.grid.length_cm, x_right_cm));
+    const double LM_for_ion_velocity = fixed_ion_velocity_length_cm > 0.0
+        ? fixed_ion_velocity_length_cm
+        : ((adaptive_profile != nullptr && adaptive_profile->LM_cm > 0.0)
+            ? adaptive_profile->LM_cm
+            : std::max(config.grid.length_cm, x_right_cm));
+    auto ion_velocity = [&](int gi, double x_cm) {
+        if (gi < 0 || gi >= static_cast<int>(levels.size())) return 0.0;
+        const double length_cm = levels[static_cast<size_t>(gi)].atomicity >= 2
+            ? LM_for_ion_velocity : L1_for_ion_velocity;
+        if (!(length_cm > 0.0)) return 0.0;
+        const double floor_fraction = std::clamp(
+            config.numerics.adaptive_recycling_domain.ion_velocity_floor_fraction,
+            0.0, 1.0);
+        const double shape = std::max(floor_fraction, 1.0 - x_cm / length_cm);
+        const auto temperatures = evaluate_plasma_temperatures(config, x_cm);
+        const double mass_amu = std::max(
+            levels[static_cast<size_t>(gi)].mass_amu, 1.0e-12);
+        return dcr::physics::calculate_Bohm_speed(
+            temperatures.electron_eV, temperatures.ion_eV, mass_amu) * shape;
+    };
+    auto ion_nuclei_flux = [&](const dcr::base::Vector& state, double x_cm) {
+        double total = 0.0;
+        for (int gi : boundary.ion_indices) {
+            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
+                ? p_pos[static_cast<size_t>(gi)] : -1;
+            if (pi < 0 || pi >= state.size() ||
+                gi >= static_cast<int>(levels.size())) continue;
+            const double mu = static_cast<double>(
+                std::max(1, levels[static_cast<size_t>(gi)].atomicity));
+            total += mu * (-ion_velocity(gi, x_cm)) * std::max(state(pi), 0.0);
+        }
+        return total;
+    };
+    const double flowA_divergence = dx_cm > 0.0
+        ? (compact_nuclei_flux(flowA_new, boundary.A_indices, boundary.u_A) -
+           compact_nuclei_flux(flowA_old, boundary.A_indices, boundary.u_A)) / dx_cm
+        : 0.0;
+    const double flowM_divergence = dx_cm > 0.0
+        ? (compact_nuclei_flux(flowM_new, boundary.M_indices, boundary.u_M) -
+           compact_nuclei_flux(flowM_old, boundary.M_indices, boundary.u_M)) / dx_cm
+        : 0.0;
+    const double flow_exhaust = (flow_atom_speed / width) *
+        nuclei_sum(flowA_new, boundary.A_indices, levels) +
+        (molecule_speed / width) * nuclei_sum(flowM_new, boundary.M_indices, levels);
+    const double ion_flux_left = ion_nuclei_flux(nP_old, x_left_cm);
+    dcr::base::Vector closure_row = atomicity;
+    const double flow_nuclei = nuclei_sum(flowA_new, boundary.A_indices, levels) +
+        nuclei_sum(flowM_new, boundary.M_indices, levels);
+    double closure_rhs = std::max(0.0, config.plasma.total_density - flow_nuclei);
+    if (variable_nuclei_balance_closure) {
+        closure_row.setZero();
+        if (dx_cm > 0.0) {
+            for (int gi : boundary.ion_indices) {
+                const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
+                    ? p_pos[static_cast<size_t>(gi)] : -1;
+                if (pi < 0 || gi >= static_cast<int>(levels.size())) continue;
+                closure_row(pi) += std::max(1, levels[static_cast<size_t>(gi)].atomicity) *
+                    (-ion_velocity(gi, x_right_cm)) / dx_cm;
+            }
+        }
+        for (int gi : boundary.atom_bg_indices) {
+            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
+                ? p_pos[static_cast<size_t>(gi)] : -1;
+            if (pi < 0 || gi >= static_cast<int>(levels.size())) continue;
+            closure_row(pi) += std::max(1, levels[static_cast<size_t>(gi)].atomicity) *
+                atom_speed / width;
+        }
+        for (int gi : boundary.mol_bg_indices) {
+            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
+                ? p_pos[static_cast<size_t>(gi)] : -1;
+            if (pi < 0 || gi >= static_cast<int>(levels.size())) continue;
+            closure_row(pi) += std::max(1, levels[static_cast<size_t>(gi)].atomicity) *
+                molecule_speed / width;
+        }
+        closure_rhs = (dx_cm > 0.0 ? ion_flux_left / dx_cm : 0.0) -
+            flowA_divergence - flowM_divergence - flow_exhaust;
+        result.variable_flowA_divergence_nuclei_cm3_s = flowA_divergence;
+        result.variable_flowM_divergence_nuclei_cm3_s = flowM_divergence;
+        result.variable_balance_rhs = closure_rhs;
+    }
+    const int constraint_row = std::min(1, Pn - 1);
+    replaced.row(constraint_row) = closure_row.transpose();
+    rhs(constraint_row) = closure_rhs;
 
     auto set_original_diag = [&](const dcr::base::Vector& n_eval) {
-        const dcr::base::Vector r =
-            Rpp * n_eval - (A * n_eval - local_system.S_background);
+        const dcr::base::Vector r = Rpp * n_eval -
+            (loss * n_eval - local_system.S_background);
         result.linear_residual_norm = r.norm();
         result.linear_mse = r.squaredNorm() / static_cast<double>(Pn);
         const double lhs_norm = (Rpp * n_eval).norm();
         result.linear_mse_rel = result.linear_residual_norm / std::max(1.0, lhs_norm);
+        if (variable_nuclei_balance_closure) {
+            const double ion_divergence = dx_cm > 0.0
+                ? (ion_nuclei_flux(n_eval, x_right_cm) - ion_flux_left) / dx_cm
+                : 0.0;
+            double local_exhaust = 0.0;
+            for (int gi : boundary.atom_bg_indices) {
+                const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
+                    ? p_pos[static_cast<size_t>(gi)] : -1;
+                if (pi < 0 || pi >= n_eval.size() ||
+                    gi >= static_cast<int>(levels.size())) continue;
+                local_exhaust += std::max(1, levels[static_cast<size_t>(gi)].atomicity) *
+                    atom_speed / width * std::max(n_eval(pi), 0.0);
+            }
+            for (int gi : boundary.mol_bg_indices) {
+                const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
+                    ? p_pos[static_cast<size_t>(gi)] : -1;
+                if (pi < 0 || pi >= n_eval.size() ||
+                    gi >= static_cast<int>(levels.size())) continue;
+                local_exhaust += std::max(1, levels[static_cast<size_t>(gi)].atomicity) *
+                    molecule_speed / width * std::max(n_eval(pi), 0.0);
+            }
+            result.variable_ion_divergence_nuclei_cm3_s = ion_divergence;
+            result.variable_neutral_exhaust_nuclei_cm3_s = local_exhaust + flow_exhaust;
+            result.variable_balance_residual = ion_divergence + flowA_divergence +
+                flowM_divergence + local_exhaust + flow_exhaust;
+        }
     };
 
-    dcr::base::Matrix C_replaced = C;
-    dcr::base::Vector rhs_replaced = rhs;
-    C_replaced.row(1) = stoich.transpose();
-    rhs_replaced(1) = target_bg_nuclei;
-    dcr::base::Vector nP_new = solve_replaced_system(C_replaced, rhs_replaced);
+    dcr::base::Vector nP_new = solve_replaced_system(replaced, rhs);
 
     if (!nP_new.allFinite()) {
         result.nP_new = nP_guess;
@@ -319,12 +457,11 @@ BackgroundSolveResult solve_background_at_cell_log(
     for (int i = 0; i < nP_new.size(); ++i) {
         nP_new(i) = std::max(nP_new(i), kLogStateFloor);
     }
-    const double now = (stoich.array() * nP_new.array()).sum();
-    if (now > 0.0 && target_bg_nuclei > 0.0) {
-        nP_new *= (target_bg_nuclei / now);
-    }
-    for (int i = 0; i < nP_new.size(); ++i) {
-        nP_new(i) = std::max(nP_new(i), kLogStateFloor);
+    if (!variable_nuclei_balance_closure) {
+        const double solved_nuclei = (atomicity.array() * nP_new.array()).sum();
+        if (closure_rhs > 0.0 && solved_nuclei > 0.0) {
+            nP_new *= closure_rhs / solved_nuclei;
+        }
     }
     result.nP_new = nP_new;
     set_original_diag(nP_new);
@@ -469,7 +606,8 @@ CellImplicitResult solve_cell_implicit_log_newton(
     bool emit_summary_log,
     const dcr::base::Vector* nP_init_override,
     const dcr::base::Vector* flowA_init_override,
-    const dcr::base::Vector* flowM_init_override) {
+    const dcr::base::Vector* flowM_init_override,
+    const AdaptiveTransportProfile* adaptive_profile) {
 
     CellImplicitResult out;
     const auto solve_timer_start = std::chrono::steady_clock::now();
@@ -479,6 +617,8 @@ CellImplicitResult solve_cell_implicit_log_newton(
     dcr::base::Vector flowM_iter = flowM_old;
     const dcr::base::Vector& flowA_inflow = flowA_old;
     const dcr::base::Vector& flowM_inflow = flowM_old;
+    const bool variable_nuclei_balance_closure =
+        config.numerics.adaptive_recycling_domain.closure_mode == "variable_nuclei_balance";
     if (nP_init_override && nP_init_override->size() == nP_old.size()) {
         nP_iter = nP_init_override->cwiseMax(kLogStateFloor);
     }
@@ -515,6 +655,21 @@ CellImplicitResult solve_cell_implicit_log_newton(
         if (nA_size > 0) nA = x.segment(nP_size, nA_size);
         if (nM_size > 0) nM = x.segment(nP_size + nA_size, nM_size);
     };
+    auto impose_nuclei_closure = [&](dcr::base::Vector& nP_state,
+                                     const dcr::base::Vector& flowA_state,
+                                     const dcr::base::Vector& flowM_state) {
+        if (variable_nuclei_balance_closure) return;
+        const double flow_nuclei = nuclei_sum(flowA_state, boundary.A_indices, levels) +
+            nuclei_sum(flowM_state, boundary.M_indices, levels);
+        const double target_background =
+            std::max(0.0, config.plasma.total_density - flow_nuclei);
+        const double background_nuclei =
+            nuclei_sum_background(nP_state, boundary, levels);
+        if (target_background > 0.0 && background_nuclei > 0.0) {
+            nP_state *= target_background / background_nuclei;
+        }
+        nP_state = nP_state.cwiseMax(kLogStateFloor);
+    };
 
     auto project_positive_state = [&](const dcr::base::Vector& x_in) {
         dcr::base::Vector nP_proj = dcr::base::Vector::Constant(nP_size, kLogStateFloor);
@@ -524,18 +679,7 @@ CellImplicitResult solve_cell_implicit_log_newton(
         nP_proj = nP_proj.cwiseMax(kLogStateFloor);
         flowA_proj = flowA_proj.cwiseMax(kLogStateFloor);
         flowM_proj = flowM_proj.cwiseMax(kLogStateFloor);
-
-        const double flow_nuclei =
-            nuclei_sum(flowA_proj, boundary.A_indices, levels) +
-            nuclei_sum(flowM_proj, boundary.M_indices, levels);
-        const double target_bg_nuclei =
-            std::max(0.0, config.plasma.total_density - flow_nuclei);
-        const double bg_nuclei_now =
-            nuclei_sum_background(nP_proj, boundary, levels);
-        if (target_bg_nuclei > 0.0 && bg_nuclei_now > 0.0) {
-            nP_proj *= (target_bg_nuclei / bg_nuclei_now);
-        }
-        nP_proj = nP_proj.cwiseMax(kLogStateFloor);
+        impose_nuclei_closure(nP_proj, flowA_proj, flowM_proj);
         return pack_state(nP_proj, flowA_proj, flowM_proj);
     };
 
@@ -585,8 +729,16 @@ CellImplicitResult solve_cell_implicit_log_newton(
             levels,
             eval.local_for_bg,
             eval.nP_iter,
+            nP_old,
+            flowA_inflow,
+            flowM_inflow,
             eval.flow_advanced.flowA_next,
-            eval.flow_advanced.flowM_next
+            eval.flow_advanced.flowM_next,
+            dx_cm,
+            x_left_cm,
+            x_right_cm,
+            adaptive_profile,
+            cell_index
         );
         eval.x_image = project_positive_state(pack_state(
             eval.bg_solve.nP_new,
@@ -695,13 +847,21 @@ CellImplicitResult solve_cell_implicit_log_newton(
     int iterations = max_iter;
     double last_rel = std::numeric_limits<double>::infinity();
     double last_resid_rel = std::numeric_limits<double>::infinity();
+    BackgroundSolveResult final_bg_solve_diag;
+    bool have_final_bg_solve_diag = false;
+    const int slow_iter_threshold = std::max(1, config.numerics.marching_slow_iter_threshold);
+    const auto should_log_iteration_record = [&](int iter) {
+        return detailed_log && (config.io.verbose_logging || (iter + 1) > slow_iter_threshold);
+    };
 
     for (int iter = 0; iter < max_iter; ++iter) {
         const auto eval = evaluate_map(y_work);
+        final_bg_solve_diag = eval.bg_solve;
+        have_final_bg_solve_diag = true;
         last_rel = eval.rel;
         last_resid_rel = eval.resid_rel;
 
-        if (config.io.verbose_logging && detailed_log) {
+        if (should_log_iteration_record(iter)) {
             const double flowA_sum_iter = positive_sum(eval.flowA_image);
             const double flowM_sum_iter = positive_sum(eval.flowM_image);
             const auto bg_iter = summarize_bg_subgroups(eval.nP_image, boundary, levels);
@@ -727,13 +887,22 @@ CellImplicitResult solve_cell_implicit_log_newton(
                       << "}"
                       << " flow{A=" << flowA_sum_iter
                       << ", M=" << flowM_sum_iter
-                      << "}"
+                      << "} L_I="
+                      << eval.bg_solve.ion_divergence_closure_nuclei_cm3_s
+                      << " source_nuc="
+                      << eval.bg_solve.recycling_source_nuclei_cm3_s
                       << "\n";
         }
 
-        if (eval.rel < tol) {
+        const double residual_tolerance = std::max(10.0 * tol, 1.0e-8);
+        if (eval.rel < tol && std::isfinite(eval.resid_rel) &&
+            eval.resid_rel < residual_tolerance && eval.residual.allFinite()) {
             y_work = eval.y_image;
             converged = true;
+            iterations = iter + 1;
+            break;
+        }
+        if (!eval.residual.allFinite() || !std::isfinite(eval.resid_rel)) {
             iterations = iter + 1;
             break;
         }
@@ -776,8 +945,12 @@ CellImplicitResult solve_cell_implicit_log_newton(
         while (alpha >= alpha_min) {
             const auto trial = evaluate_map(eval.y_projected + alpha * delta);
             const double trial_norm = trial.residual.norm();
+            const double trial_rel = trial.rel;
             if (trial_norm < norm0 * (1.0 - 1.0e-4 * alpha) ||
-                trial_norm < 0.95 * norm0) {
+                trial_norm < 0.95 * norm0 ||
+                (std::isfinite(trial_rel) &&
+                 (trial_rel < eval.rel * (1.0 - 1.0e-4 * alpha) ||
+                  trial_rel < 0.95 * eval.rel))) {
                 accepted_eval = trial;
                 accepted = true;
                 break;
@@ -786,15 +959,48 @@ CellImplicitResult solve_cell_implicit_log_newton(
         }
 
         if (!accepted) {
-            alpha = std::min(0.1, std::max(alpha_min, std::max(1.0e-2, 0.05 * tau)));
+            const double picard_delta_norm =
+                (eval.y_image - eval.y_projected).norm();
+            const double fallback_alpha0 =
+                std::min(0.1, std::max(alpha_min, std::max(1.0e-2, 0.05 * tau)));
+            alpha = fallback_alpha0;
             accepted_eval = evaluate_map(
                 eval.y_projected + alpha * (eval.y_image - eval.y_projected)
             );
+            double best_norm = accepted_eval.residual.norm();
+            double best_rel = accepted_eval.rel;
+            if (picard_delta_norm > 0.0) {
+                const double fallback_alphas[] = {0.1, 0.05, 0.02, 0.01};
+                for (double candidate_raw : fallback_alphas) {
+                    const double candidate = std::min(0.1, std::max(alpha_min, candidate_raw));
+                    const auto trial = evaluate_map(
+                        eval.y_projected + candidate * (eval.y_image - eval.y_projected)
+                    );
+                    const double trial_norm = trial.residual.norm();
+                    const double trial_rel = trial.rel;
+                    if (!std::isfinite(trial_norm) || !std::isfinite(trial_rel)) continue;
+                    if (trial_norm <= 1.02 * norm0 || trial_rel <= 1.02 * eval.rel) {
+                        accepted_eval = trial;
+                        alpha = candidate;
+                        best_norm = trial_norm;
+                        best_rel = trial_rel;
+                        break;
+                    }
+                    if (!std::isfinite(best_norm) || trial_norm < best_norm ||
+                        (std::isfinite(best_rel) && trial_rel < best_rel)) {
+                        accepted_eval = trial;
+                        alpha = candidate;
+                        best_norm = trial_norm;
+                        best_rel = trial_rel;
+                    }
+                }
+            }
             tau = std::max(1.0e-6, 0.5 * tau);
-            if (config.io.verbose_logging && detailed_log) {
+            if (should_log_iteration_record(iter)) {
                 std::cout << "[DCR_Solver] Marching cell " << cell_index
                           << ": LOG-NK line search failed, falling back to conservative log-Picard step"
                           << " alpha=" << alpha
+                          << " fallback_resid=" << best_norm
                           << " tau=" << tau
                           << "\n";
             }
@@ -805,7 +1011,9 @@ CellImplicitResult solve_cell_implicit_log_newton(
         }
 
         y_work = accepted_eval.y_projected;
-        if (config.io.verbose_logging && detailed_log) {
+        final_bg_solve_diag = accepted_eval.bg_solve;
+        have_final_bg_solve_diag = true;
+        if (should_log_iteration_record(iter)) {
             std::cout << "[DCR_Solver] Marching cell " << cell_index
                       << ": LOG-NK step"
                       << " alpha=" << alpha
@@ -817,6 +1025,32 @@ CellImplicitResult solve_cell_implicit_log_newton(
     }
 
     finalize_output(y_work, iterations, converged, last_rel, last_resid_rel);
+    if (have_final_bg_solve_diag) {
+        out.variable_nuclei_balance_closure =
+            final_bg_solve_diag.variable_nuclei_balance_closure;
+        out.variable_ion_divergence_nuclei_cm3_s =
+            final_bg_solve_diag.variable_ion_divergence_nuclei_cm3_s;
+        out.variable_flowA_divergence_nuclei_cm3_s =
+            final_bg_solve_diag.variable_flowA_divergence_nuclei_cm3_s;
+        out.variable_flowM_divergence_nuclei_cm3_s =
+            final_bg_solve_diag.variable_flowM_divergence_nuclei_cm3_s;
+        out.variable_neutral_exhaust_nuclei_cm3_s =
+            final_bg_solve_diag.variable_neutral_exhaust_nuclei_cm3_s;
+        out.variable_balance_rhs_cm3_s = final_bg_solve_diag.variable_balance_rhs;
+        out.variable_balance_residual_cm3_s =
+            final_bg_solve_diag.variable_balance_residual;
+        out.prescribed_nuclei_density_cm3 = config.plasma.total_density;
+        out.recycling_source_nuclei_cm3_s =
+            final_bg_solve_diag.recycling_source_nuclei_cm3_s;
+        out.local_atom_exhaust_nuclei_cm3_s =
+            final_bg_solve_diag.local_atom_exhaust_nuclei_cm3_s;
+        out.local_molecule_exhaust_nuclei_cm3_s =
+            final_bg_solve_diag.local_molecule_exhaust_nuclei_cm3_s;
+        out.ion_divergence_closure_nuclei_cm3_s =
+            final_bg_solve_diag.ion_divergence_closure_nuclei_cm3_s;
+        out.ion_balance_coefficient_s =
+            final_bg_solve_diag.ion_balance_coefficient_s;
+    }
     return out;
 }
 

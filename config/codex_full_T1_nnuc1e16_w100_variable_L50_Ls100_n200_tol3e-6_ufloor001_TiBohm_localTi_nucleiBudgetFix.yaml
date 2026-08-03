@@ -1,0 +1,68 @@
+io:
+  output_dir: output/full_T1_nnuc1e16_w100_variable_L50_Ls100_n200_tol3e-6_ufloor001_TiBohm_localTi_nucleiBudgetFix
+  atomic_data_root: atomic_data/
+  data_tables_root: data_tables/
+  verbose_logging: false
+species:
+- name: H_Atom
+  filename: sclit.01
+  is_molecule: false
+- name: H2_Molecule
+  filename: sclit_M.01
+  is_molecule: true
+grid:
+  length_cm: 50.0
+  num_cells: 200
+  type: log
+  first_cell_cm: 0.001
+  poloidal_width_cm: 100.0
+plasma:
+  total_density_cm3: 1e16
+  Te_eV: 1.0
+  Ti_eV: 1.0
+  neutral_atom_temperature_eV: 0.1
+  neutral_molecule_temperature_eV: 0.1
+  initial_conditions:
+  - index: 0
+    fraction: 0.2
+  - index: 1
+    fraction: 0.6
+  - index: 31
+    fraction: 0.1
+wall:
+  material: W
+  sheath_potential_drop: 4.0
+  temperature_eV: 0.1
+numerics:
+  tolerance: 1.0e-07
+  max_iterations: 5000
+  relaxation: 0.9
+  h2_dissociation_model: reconstructed
+  boundary_solver: newton_krylov_ptc
+  boundary_tolerance: 1.0e-06
+  boundary_max_iterations: 300
+  boundary_neutral_exhaust: true
+  boundary_molecular_flow_acceptance: 1.0
+  marching_solver: newton_krylov_ptc
+  marching_tolerance: 3.0e-06
+  marching_max_iterations: 1000
+  marching_guess_retries: 1
+  abort_on_marching_nonconvergence: true
+  marching_ptc_tau_init: 0.05
+  marching_ptc_tau_max: 200.0
+  marching_nk_krylov_dim: 10
+  marching_nk_max_restarts: 2
+  marching_nk_fd_eps: 1.0e-06
+  marching_nk_alpha_min: 1.0e-04
+  adaptive_recycling_domain:
+    enabled: true
+    initial_L_box_cm: 50.0
+    max_L_box_cm: 50.0
+    epsilon_A: 3.0e-02
+    epsilon_M: 1.0e-02
+    max_outer_iterations: 1
+    L1_relative_tolerance: 5.0e-02
+    neutral_partition_mode: nuclei_fraction
+    closure_mode: variable_nuclei_balance
+    ion_velocity_length_cm: 100.0
+    ion_velocity_floor_fraction: 0.01

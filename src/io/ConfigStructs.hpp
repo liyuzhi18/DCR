@@ -12,11 +12,14 @@ namespace dcr::io {
         // - "full_dcr": current fully resolved model
         // - "qss_dcr": reduced model with atomic transient states eliminated
         std::string mode = "full_dcr";
+        // Spatial formulation for full_dcr. The production default marches
+        // from the wall; the global BVP is an explicitly gated experiment.
+        std::string spatial_method = "wall_to_upstream_march";
     };
 
     struct TemperatureProfileConfig {
         bool enabled = false;
-        std::string type = "constant"; // "constant" or "linear_x"
+        std::string type = "constant"; // "constant", "linear_x", or "constant_heat_flux"
         base::Real value_eV = 0.0;
         base::Real x_start_cm = 0.0;
         base::Real x_end_cm = 0.0;
@@ -46,7 +49,15 @@ namespace dcr::io {
         int num_cells = 0;
         std::string type = "uniform";     // "log" or "linear"
         base::Real first_cell_cm = 0.0;
-        base::Real poloidal_width_cm = 1.0; // wall-parallel width w
+        base::Real boundary_poloidal_width_cm = 1.0;
+        base::Real spatial_exhaust_width_cm = 1.0;
+    };
+
+    struct GlobalBVPConfig {
+        base::Real ion_velocity_transition_length_cm = 50.0;
+        base::Real ion_upstream_speed_fraction = 0.1;
+        base::Real final_domain_length_cm = 50.0;
+        bool diagnostic_logging = false;
     };
 
     struct InitialCondition {
@@ -80,12 +91,31 @@ namespace dcr::io {
     };
 
     struct NumericsConfig {
+        struct AdaptiveRecyclingDomainConfig {
+            bool enabled = false;
+            base::Real initial_L_box_cm = 2.0;
+            base::Real max_L_box_cm = 20.0;
+            base::Real epsilon_A = 1e-2;
+            base::Real epsilon_M = 1e-2;
+            int max_outer_iterations = 5;
+            base::Real L1_relative_tolerance = 5e-2;
+            base::Real ion_velocity_length_cm = 0.0;
+            base::Real ion_velocity_floor_fraction = 1e-2;
+            std::string neutral_partition_mode = "nuclei_fraction";
+            bool apply_ion_closure = false;
+            std::string closure_mode = "fixed_density";
+        };
+
         base::Real tolerance = 1e-6;
         int max_iterations = 1000;
         // Optional boundary-only convergence controls. Non-positive values fall
         // back to the legacy shared fields above.
         base::Real boundary_tolerance = 0.0;
         int boundary_max_iterations = 0;
+        bool boundary_neutral_exhaust = true;
+        // Fraction of desorbed molecules accepted into the directed recycling flow.
+        // Default 1.0 preserves the historical boundary closure.
+        base::Real boundary_molecular_flow_acceptance = 1.0;
         // Optional marching-only iteration cap. Non-positive means "reuse
         // max_iterations" so older configs behave exactly as before.
         base::Real marching_tolerance = 0.0;
@@ -145,6 +175,7 @@ namespace dcr::io {
         // Empty defaults to mccc.
         // Explicit values: mccc/mccc_total, reconstructed/reconstruct, janev/janev_table, legacy.
         std::string h2_dissociation_model;
+        AdaptiveRecyclingDomainConfig adaptive_recycling_domain;
     };
 
     // --- The Main Config Object ---
@@ -153,6 +184,7 @@ namespace dcr::io {
         IOConfig io;
         std::vector<SpeciesConfig> species;
         GridConfig grid;
+        GlobalBVPConfig global_bvp;
         PlasmaConfig plasma;
         WallConfig wall;
         NumericsConfig numerics;

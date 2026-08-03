@@ -264,9 +264,10 @@ RecyclingModel build_recycling_model(
     const BoundaryPhaseResult& boundary,
     const std::vector<dcr::atomic::EnergyLevel>& levels,
     const std::vector<int>& p_pos,
-    double c_A,
-    double c_A_base,
-    double c_M_atom) {
+    double Te_eV,
+    double Ti_eV,
+    const dcr::physics::WallRecycling& wall,
+    double molecular_flow_acceptance) {
 
     RecyclingModel model;
     model.ion_p_cols.reserve(boundary.ion_indices.size());
@@ -282,6 +283,19 @@ RecyclingModel build_recycling_model(
             ? std::max(1, levels[static_cast<size_t>(gi)].atomicity)
             : 1;
         const bool molecular_ion = mu_i > 1;
+        const double mass_amu = (gi < static_cast<int>(levels.size()))
+            ? std::max(levels[static_cast<size_t>(gi)].mass_amu, 1.0e-12)
+            : static_cast<double>(mu_i);
+        const double u_bohm_i = dcr::physics::calculate_Bohm_speed(
+            Te_eV, Ti_eV, mass_amu);
+        const double c_A = (boundary.u_A > 0.0)
+            ? wall.alpha_atom * u_bohm_i / boundary.u_A : 0.0;
+        const double c_A_base = (boundary.u_A > 0.0)
+            ? u_bohm_i / boundary.u_A : 0.0;
+        const double c_M_atom = (boundary.u_M > 0.0)
+            ? molecular_flow_acceptance * wall.alpha_molecule * u_bohm_i /
+                (2.0 * boundary.u_M)
+            : 0.0;
 
         model.ion_p_cols.push_back(pi);
         // Molecular ions are assumed to neutralize and return as atoms only:
@@ -347,8 +361,6 @@ BoundaryPhaseResult run_boundary_phase(
     out.population = dcr::base::Vector::Zero(total_states);
 
     // Speeds for recycling closure.
-    const double u_bohm = dcr::physics::calculate_Bohm_speed(
-        boundary_temperatures.electron_eV, boundary_temperatures.ion_eV, ion_mass_amu);
     const double E_ref_atom = wall.gamma_E_atom * wall.ion_impact_energy_ev;
     out.u_A = dcr::physics::calculate_speed_from_energy_ev(E_ref_atom, ion_mass_amu);
 
@@ -459,18 +471,25 @@ BoundaryPhaseResult run_boundary_phase(
         nP.setConstant(n_nuclei0 / stoich_sum);
     }
     const double mu_M = 2.0;
-    const double c_A = (out.u_A > 0.0) ? (wall.alpha_atom * u_bohm / out.u_A) : 0.0;
-    const double c_A_base = (out.u_A > 0.0) ? (u_bohm / out.u_A) : 0.0;
-    const double c_M_atom = (out.u_M > 0.0) ? (wall.alpha_molecule * u_bohm / (mu_M * out.u_M)) : 0.0;
-    const RecyclingModel rec_model = build_recycling_model(out, levels, p_pos, c_A, c_A_base, c_M_atom);
+    const double molecular_flow_acceptance = std::clamp(
+        config.numerics.boundary_molecular_flow_acceptance, 0.0, 1.0);
+    const RecyclingModel rec_model = build_recycling_model(
+        out,
+        levels,
+        p_pos,
+        boundary_temperatures.electron_eV,
+        boundary_temperatures.ion_eV,
+        wall,
+        molecular_flow_acceptance
+    );
 
     const double c_s_A = dcr::physics::calculate_thermal_speed(
-        config.plasma.neutral_atom_temperature_eV, out.atom_mass_amu);
+        boundary_temperatures.ion_eV, out.atom_mass_amu);
     const double c_s_M = dcr::physics::calculate_thermal_speed(
         config.plasma.neutral_molecule_temperature_eV, out.molecule_mass_amu);
-    const double w_local = std::max(config.grid.poloidal_width_cm, 1e-12);
-    const double exA_coef = c_s_A / w_local;
-    const double exM_coef = c_s_M / w_local;
+    const double w_local = std::max(config.grid.boundary_poloidal_width_cm, 1e-12);
+    const double exA_coef = config.numerics.boundary_neutral_exhaust ? (c_s_A / w_local) : 0.0;
+    const double exM_coef = config.numerics.boundary_neutral_exhaust ? (c_s_M / w_local) : 0.0;
 
     const int boundary_cap =
         (config.numerics.boundary_max_iterations > 0)
@@ -900,14 +919,42 @@ BoundaryPhaseResult run_boundary_phase(
                 }
 
                 if (!accepted) {
-                    alpha = std::min(0.1, std::max(alpha_min, 0.05 * tau));
+                    const double picard_delta_norm =
+                        (eval.y_image - eval.y_projected).norm();
+                    const double fallback_alpha0 =
+                        std::min(0.1, std::max(alpha_min, std::max(1.0e-2, 0.05 * tau)));
+                    alpha = fallback_alpha0;
                     accepted_eval = evaluate_log_map(
                         eval.y_projected + alpha * (eval.y_image - eval.y_projected)
                     );
+                    double best_norm = accepted_eval.residual.norm();
+                    if (picard_delta_norm > 0.0) {
+                        const double fallback_alphas[] = {0.1, 0.05, 0.02, 0.01};
+                        for (double candidate_raw : fallback_alphas) {
+                            const double candidate = std::min(0.1, std::max(alpha_min, candidate_raw));
+                            const auto trial = evaluate_log_map(
+                                eval.y_projected + candidate * (eval.y_image - eval.y_projected)
+                            );
+                            const double trial_norm = trial.residual.norm();
+                            if (!std::isfinite(trial_norm)) continue;
+                            if (trial_norm <= 1.02 * norm0) {
+                                accepted_eval = trial;
+                                alpha = candidate;
+                                best_norm = trial_norm;
+                                break;
+                            }
+                            if (!std::isfinite(best_norm) || trial_norm < best_norm) {
+                                accepted_eval = trial;
+                                alpha = candidate;
+                                best_norm = trial_norm;
+                            }
+                        }
+                    }
                     tau = std::max(1.0e-6, 0.5 * tau);
                     if (config.io.verbose_logging) {
                         std::cout << "[DCR_Solver] Boundary: LOG-NK line search failed, falling back to conservative log-Picard step"
                                   << " alpha=" << alpha
+                                  << " fallback_resid=" << best_norm
                                   << " tau=" << tau
                                   << "\n";
                     }
@@ -1044,14 +1091,42 @@ BoundaryPhaseResult run_boundary_phase(
             }
 
             if (!accepted) {
-                alpha = std::min(0.1, std::max(alpha_min, 0.05 * tau));
+                const double picard_delta_norm =
+                    (eval.x_image - eval.x_projected).norm();
+                const double fallback_alpha0 =
+                    std::min(0.1, std::max(alpha_min, std::max(1.0e-2, 0.05 * tau)));
+                alpha = fallback_alpha0;
                 accepted_eval = evaluate_map(
                     eval.x_projected + alpha * (eval.x_image - eval.x_projected)
                 );
+                double best_norm = accepted_eval.residual.norm();
+                if (picard_delta_norm > 0.0) {
+                    const double fallback_alphas[] = {0.1, 0.05, 0.02, 0.01};
+                    for (double candidate_raw : fallback_alphas) {
+                        const double candidate = std::min(0.1, std::max(alpha_min, candidate_raw));
+                        const auto trial = evaluate_map(
+                            eval.x_projected + candidate * (eval.x_image - eval.x_projected)
+                        );
+                        const double trial_norm = trial.residual.norm();
+                        if (!std::isfinite(trial_norm)) continue;
+                        if (trial_norm <= 1.02 * norm0) {
+                            accepted_eval = trial;
+                            alpha = candidate;
+                            best_norm = trial_norm;
+                            break;
+                        }
+                        if (!std::isfinite(best_norm) || trial_norm < best_norm) {
+                            accepted_eval = trial;
+                            alpha = candidate;
+                            best_norm = trial_norm;
+                        }
+                    }
+                }
                 tau = std::max(1.0e-6, 0.5 * tau);
                 if (config.io.verbose_logging) {
                     std::cout << "[DCR_Solver] Boundary: NK line search failed, falling back to conservative Picard step"
                               << " alpha=" << alpha
+                              << " fallback_resid=" << best_norm
                               << " alpha_pos=" << alpha_pos
                               << " tau=" << tau
                               << "\n";
@@ -1560,15 +1635,6 @@ BoundaryPhaseResult run_boundary_phase(
     out.final_residual_rel = final_residual_rel;
     out.elapsed_seconds = elapsed_seconds_since(boundary_timer_start);
 
-    // Final output projection.
-    for (int gi : out.R_indices) {
-        if (gi >= 0 && gi < out.population.size()) out.population(gi) = 0.0;
-    }
-    for (int i = 0; i < Pn; ++i) {
-        const int gi = out.P_indices[static_cast<size_t>(i)];
-        out.population(gi) = std::max(0.0, nP(i));
-    }
-
     double n_A_total_final = 0.0;
     double n_M_total_final = 0.0;
     for (size_t k = 0; k < rec_model.ion_p_cols.size(); ++k) {
@@ -1580,6 +1646,30 @@ BoundaryPhaseResult run_boundary_phase(
     }
     n_A_total_final = std::max(0.0, n_A_total_final);
     n_M_total_final = std::max(0.0, n_M_total_final);
+
+    // Recycling is linear in the ion populations. Project the final background
+    // and recycled flows together so the target node satisfies nuclei closure
+    // exactly even when the nonlinear boundary iteration stops at tolerance.
+    const double final_total_nuclei = stoich.dot(nP) +
+        n_A_total_final + mu_M * n_M_total_final;
+    if (n_nuclei0 <= 0.0) {
+        nP.setZero();
+        n_A_total_final = 0.0;
+        n_M_total_final = 0.0;
+    } else if (final_total_nuclei > 0.0) {
+        const double scale = n_nuclei0 / final_total_nuclei;
+        nP *= scale;
+        n_A_total_final *= scale;
+        n_M_total_final *= scale;
+    }
+
+    for (int gi : out.R_indices) {
+        if (gi >= 0 && gi < out.population.size()) out.population(gi) = 0.0;
+    }
+    for (int i = 0; i < Pn; ++i) {
+        const int gi = out.P_indices[static_cast<size_t>(i)];
+        out.population(gi) = std::max(0.0, nP(i));
+    }
 
     if (out.explicit_recycling) {
         if (out.atom_ground >= 0 && out.atom_ground < out.population.size()) {

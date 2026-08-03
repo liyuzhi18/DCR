@@ -163,7 +163,8 @@ int main(int argc, char** argv) {
         const double c_s_A = dcr::physics::calculate_thermal_speed(
             cfg.plasma.neutral_atom_temperature_eV, boundary.atom_mass_amu
         );
-        const double exA_over_w = c_s_A / std::max(cfg.grid.poloidal_width_cm, 1e-12);
+        const double exA_over_w = c_s_A /
+            std::max(cfg.grid.boundary_poloidal_width_cm, 1e-12);
         const double exhaust_h = exA_over_w * n_h_total;
 
         dcr::solver::AtomicRateCalculator rate_calc(atomic_data);

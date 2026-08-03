@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
         const double c_s_M = dcr::physics::calculate_thermal_speed(
             cfg.plasma.neutral_molecule_temperature_eV, boundary.molecule_mass_amu
         );
-        const double w_local = std::max(cfg.grid.poloidal_width_cm, 1e-12);
+        const double w_local = std::max(cfg.grid.boundary_poloidal_width_cm, 1e-12);
         const double exM_over_w = c_s_M / w_local;
 
         std::cout << std::setprecision(8) << std::scientific;

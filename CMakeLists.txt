@@ -8,6 +8,11 @@ endif()
 
 project(DCR_Solver_Pro VERSION 1.0 LANGUAGES CXX)
 
+option(DCR_ENABLE_SLOW_TESTS
+    "Register expensive reduced global-BVP integration tests" OFF)
+option(DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP
+    "Compile the experimental target-conditioned global BVP" OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -102,6 +107,7 @@ add_library(dcr_solver
     src/solver/core/ConfigPaths.cpp
     src/solver/core/RateAnalysis.cpp
     src/solver/marching/MarchingDriver.cpp
+    src/solver/marching/AdaptiveRecycling.cpp
     src/solver/marching/CellSolve.cpp
     src/solver/marching/LogNewtonCellSolve.cpp
     src/solver/marching/LocalSystemAssembler.cpp
@@ -138,6 +144,10 @@ target_include_directories(dcr_solver PUBLIC src/solver)
 target_include_directories(dcr_solver PRIVATE ${HDF5_INCLUDE_DIRS})
 target_link_libraries(dcr_solver PUBLIC dcr_state dcr_io dcr_physics dcr_atomic ${HDF5_CXX_LIBRARIES})
 target_compile_definitions(dcr_solver PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+if(DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP)
+    target_sources(dcr_solver PRIVATE src/solver/marching/GlobalBVP.cpp)
+    target_compile_definitions(dcr_solver PUBLIC DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP=1)
+endif()
 
 # =========================================================
 # 4. Main Executable
@@ -289,6 +299,124 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_marching_implicit.cpp")
     add_test(NAME MarchingImplicitCheck COMMAND check_marching_implicit)
 endif()
 
+if(DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP AND EXISTS "${CMAKE_SOURCE_DIR}/tests/test_global_bvp_transport.cpp")
+    add_executable(check_global_bvp_transport tests/test_global_bvp_transport.cpp)
+    target_compile_definitions(check_global_bvp_transport PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(check_global_bvp_transport PRIVATE dcr_solver)
+    add_test(NAME check_global_bvp_transport COMMAND check_global_bvp_transport)
+endif()
+
+if(DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP AND EXISTS "${CMAKE_SOURCE_DIR}/tests/test_global_bvp_fixed_velocity_scale.cpp")
+    add_executable(check_global_bvp_fixed_velocity_scale tests/test_global_bvp_fixed_velocity_scale.cpp)
+    target_compile_definitions(check_global_bvp_fixed_velocity_scale PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(check_global_bvp_fixed_velocity_scale PRIVATE dcr_solver)
+    add_test(NAME check_global_bvp_fixed_velocity_scale COMMAND check_global_bvp_fixed_velocity_scale)
+endif()
+
+if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_global_bvp_width_separation.cpp")
+    add_executable(check_boundary_spatial_width_separation tests/test_global_bvp_width_separation.cpp)
+    target_compile_definitions(check_boundary_spatial_width_separation PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(check_boundary_spatial_width_separation PRIVATE dcr_solver)
+    add_test(NAME BoundarySpatialWidthSeparationCheck COMMAND check_boundary_spatial_width_separation)
+endif()
+
+if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_local_chemistry_conservation.cpp")
+    add_executable(check_local_chemistry_conservation tests/test_local_chemistry_conservation.cpp)
+    target_compile_definitions(check_local_chemistry_conservation PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(check_local_chemistry_conservation PRIVATE dcr_solver)
+    add_test(NAME LocalChemistryConservationCheck COMMAND check_local_chemistry_conservation)
+endif()
+
+if(DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP AND EXISTS "${CMAKE_SOURCE_DIR}/tests/test_global_bvp_jacobian.cpp")
+    add_executable(check_global_bvp_jacobian tests/test_global_bvp_jacobian.cpp)
+    target_compile_definitions(check_global_bvp_jacobian PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(check_global_bvp_jacobian PRIVATE dcr_solver)
+    add_test(NAME check_global_bvp_jacobian COMMAND check_global_bvp_jacobian)
+endif()
+
+if(DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP)
+foreach(global_bvp_reduced_test IN ITEMS
+        forward_M_transport
+        no_M_global_unknowns
+        fd_M_coupling)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_global_bvp_${global_bvp_reduced_test}.cpp")
+        add_executable(check_global_bvp_${global_bvp_reduced_test}
+            tests/test_global_bvp_${global_bvp_reduced_test}.cpp)
+        target_compile_definitions(check_global_bvp_${global_bvp_reduced_test}
+            PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+        target_link_libraries(check_global_bvp_${global_bvp_reduced_test} PRIVATE dcr_solver)
+        add_test(NAME check_global_bvp_${global_bvp_reduced_test}
+            COMMAND check_global_bvp_${global_bvp_reduced_test})
+    endif()
+endforeach()
+endif()
+
+if(DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP AND EXISTS "${CMAKE_SOURCE_DIR}/tests/test_global_bvp_boundary_count.cpp")
+    add_executable(check_global_bvp_boundary_count tests/test_global_bvp_boundary_count.cpp)
+    target_compile_definitions(check_global_bvp_boundary_count PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(check_global_bvp_boundary_count PRIVATE dcr_solver)
+    add_test(NAME check_global_bvp_boundary_count COMMAND check_global_bvp_boundary_count)
+endif()
+
+if(DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP AND EXISTS "${CMAKE_SOURCE_DIR}/tests/test_global_bvp_two_node.cpp")
+    add_executable(check_global_bvp_two_node tests/test_global_bvp_two_node.cpp)
+    target_compile_definitions(check_global_bvp_two_node PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(check_global_bvp_two_node PRIVATE dcr_solver)
+    add_test(NAME check_global_bvp_two_node COMMAND check_global_bvp_two_node)
+endif()
+
+if(DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP AND EXISTS "${CMAKE_SOURCE_DIR}/tests/test_global_bvp_small_grid.cpp")
+    add_executable(check_global_bvp_small_grid tests/test_global_bvp_small_grid.cpp)
+    target_compile_definitions(check_global_bvp_small_grid PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(check_global_bvp_small_grid PRIVATE dcr_solver)
+    add_test(NAME check_global_bvp_small_grid COMMAND check_global_bvp_small_grid)
+    add_test(NAME check_global_bvp_nuclei_balance COMMAND check_global_bvp_small_grid)
+    add_test(NAME check_global_bvp_flux_chemistry_balance COMMAND check_global_bvp_small_grid)
+endif()
+
+if(DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP AND EXISTS "${CMAKE_SOURCE_DIR}/tests/test_global_bvp_grid_refinement.cpp")
+    add_executable(check_global_bvp_reduced_refinement
+        tests/test_global_bvp_grid_refinement.cpp)
+    target_compile_definitions(check_global_bvp_reduced_refinement PRIVATE
+        DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(check_global_bvp_reduced_refinement PRIVATE dcr_solver)
+    set(global_bvp_refinement_checkpoint_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/Testing/global_bvp_refinement_checkpoints")
+    add_test(NAME check_global_bvp_reduced_refinement_fast
+        COMMAND check_global_bvp_reduced_refinement --fast
+            "${global_bvp_refinement_checkpoint_dir}")
+    set_tests_properties(check_global_bvp_reduced_refinement_fast PROPERTIES
+        TIMEOUT 3600
+        LABELS "short;global-bvp;refinement"
+        FIXTURES_SETUP global_bvp_refinement_checkpoint)
+    if(DCR_ENABLE_SLOW_TESTS)
+        add_test(NAME check_global_bvp_reduced_refinement_slow
+            COMMAND check_global_bvp_reduced_refinement --slow
+                "${global_bvp_refinement_checkpoint_dir}")
+        set_tests_properties(check_global_bvp_reduced_refinement_slow PROPERTIES
+            TIMEOUT 10800
+            LABELS "slow;global-bvp;refinement"
+            FIXTURES_REQUIRED global_bvp_refinement_checkpoint)
+    endif()
+    add_custom_target(run_global_bvp_reduced_refinement_slow
+        COMMAND check_global_bvp_reduced_refinement --slow
+            "${global_bvp_refinement_checkpoint_dir}"
+        DEPENDS check_global_bvp_reduced_refinement
+        USES_TERMINAL)
+endif()
+
+if(DCR_ENABLE_EXPERIMENTAL_GLOBAL_BVP AND EXISTS "${CMAKE_SOURCE_DIR}/tests/run_global_bvp_physical.cpp")
+    add_executable(run_global_bvp_physical tests/run_global_bvp_physical.cpp)
+    target_compile_definitions(run_global_bvp_physical PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(run_global_bvp_physical PRIVATE dcr_solver)
+endif()
+
+if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_adaptive_recycling.cpp")
+    add_executable(check_adaptive_recycling tests/test_adaptive_recycling.cpp)
+    target_link_libraries(check_adaptive_recycling PRIVATE dcr_solver)
+    add_test(NAME AdaptiveRecyclingCheck COMMAND check_adaptive_recycling)
+endif()
+
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_marching_driver.cpp")
     add_executable(check_marching_driver tests/test_marching_driver.cpp)
     target_compile_definitions(check_marching_driver PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
@@ -315,6 +443,13 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/tests/inspect_boundary_h2_balance.cpp")
     add_executable(inspect_boundary_h2_balance tests/inspect_boundary_h2_balance.cpp)
     target_compile_definitions(inspect_boundary_h2_balance PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     target_link_libraries(inspect_boundary_h2_balance PRIVATE dcr_solver)
+endif()
+
+if(EXISTS "${CMAKE_SOURCE_DIR}/tests/verify_endpoint_standalone_cr.cpp")
+    add_executable(verify_endpoint_standalone_cr tests/verify_endpoint_standalone_cr.cpp)
+    target_compile_definitions(verify_endpoint_standalone_cr PRIVATE DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_include_directories(verify_endpoint_standalone_cr PRIVATE ${HDF5_INCLUDE_DIRS})
+    target_link_libraries(verify_endpoint_standalone_cr PRIVATE dcr_solver ${HDF5_CXX_LIBRARIES})
 endif()
 
 find_package(Python3 COMPONENTS Interpreter QUIET)

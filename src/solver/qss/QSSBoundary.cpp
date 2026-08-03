@@ -172,10 +172,10 @@ QSSBoundaryResult solve_qss_boundary(
     const RecyclingModel rec_model = build_recycling_model(qss_boundary, levels, p_pos, c_A, c_A_base, c_M_atom);
 
     const double c_s_A = dcr::physics::calculate_thermal_speed(
-        config.plasma.neutral_atom_temperature_eV, qss_boundary.atom_mass_amu);
+        boundary_temperatures.ion_eV, qss_boundary.atom_mass_amu);
     const double c_s_M = dcr::physics::calculate_thermal_speed(
         config.plasma.neutral_molecule_temperature_eV, qss_boundary.molecule_mass_amu);
-    const double w_local = std::max(config.grid.poloidal_width_cm, 1e-12);
+    const double w_local = std::max(config.grid.boundary_poloidal_width_cm, 1e-12);
     const double exA_over_w = c_s_A / w_local;
     const double exM_over_w = c_s_M / w_local;
 
