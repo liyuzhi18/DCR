@@ -258,6 +258,20 @@ namespace dcr::io {
                     adaptive["apply_ion_closure"].as<bool>(false);
                 config.numerics.adaptive_recycling_domain.closure_mode =
                     adaptive["closure_mode"].as<std::string>("fixed_density");
+                const auto& closure_mode =
+                    config.numerics.adaptive_recycling_domain.closure_mode;
+                if (closure_mode != "fixed_density" &&
+                    closure_mode != "variable_nuclei_balance" &&
+                    closure_mode != "individual_ion_flux_divergence") {
+                    throw std::runtime_error(
+                        "adaptive_recycling_domain.closure_mode must be fixed_density, "
+                        "variable_nuclei_balance, or individual_ion_flux_divergence");
+                }
+                if (closure_mode == "individual_ion_flux_divergence" &&
+                    config.numerics.adaptive_recycling_domain.apply_ion_closure) {
+                    throw std::runtime_error(
+                        "individual_ion_flux_divergence is incompatible with apply_ion_closure");
+                }
             }
         }
 

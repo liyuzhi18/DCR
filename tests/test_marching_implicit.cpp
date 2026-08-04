@@ -275,6 +275,90 @@ int main() {
                 "Variable nuclei closure did not satisfy the local balance row");
     }
 
+    auto cfg_individual_ion = cfg;
+    cfg_individual_ion.numerics.marching_solver = "newton_krylov_ptc";
+    cfg_individual_ion.numerics.adaptive_recycling_domain.closure_mode =
+        "individual_ion_flux_divergence";
+    cfg_individual_ion.numerics.adaptive_recycling_domain.apply_ion_closure = false;
+    cfg_individual_ion.numerics.adaptive_recycling_domain.ion_velocity_length_cm = 2.0;
+    cfg_individual_ion.numerics.adaptive_recycling_domain.ion_velocity_floor_fraction = 0.01;
+    cfg_individual_ion.numerics.marching_tolerance = 1.0e-5;
+    cfg_individual_ion.numerics.marching_max_iterations = 200;
+    constexpr double ion_dx_cm = 1.0e-3;
+    const auto individual_ion_step = dcr::solver::solve_cell_implicit(
+        cfg_individual_ion,
+        atomic_data,
+        plasma,
+        eedf.grid,
+        boundary,
+        levels,
+        nP,
+        flowA_old,
+        flowM_old,
+        ion_dx_cm,
+        0.0,
+        ion_dx_cm,
+        1,
+        false,
+        false
+    );
+    require(individual_ion_step.variable_nuclei_balance_closure,
+            "Individual-ion flux-divergence closure was not selected");
+    require(individual_ion_step.converged,
+            "Individual-ion flux-divergence closure did not converge");
+    test_dcr::assert_all_finite_nonnegative(individual_ion_step.nP_new);
+    const dcr::base::Matrix individual_Rpp = extract_block(
+        individual_ion_step.local_final.R_full, boundary.P_indices);
+    const dcr::base::Vector individual_chemistry =
+        individual_Rpp * individual_ion_step.nP_new +
+        individual_ion_step.local_final.S_background;
+    const auto ion_velocity = [&](int gi, double x_cm) {
+        const auto temperatures = test_dcr::plasma_temperatures_at(
+            cfg_individual_ion, x_cm);
+        const double bohm = dcr::physics::calculate_Bohm_speed(
+            temperatures.electron_eV,
+            temperatures.ion_eV,
+            levels[static_cast<size_t>(gi)].mass_amu);
+        const double shape = std::max(
+            cfg_individual_ion.numerics.adaptive_recycling_domain
+                .ion_velocity_floor_fraction,
+            1.0 - x_cm /
+                cfg_individual_ion.numerics.adaptive_recycling_domain
+                    .ion_velocity_length_cm);
+        return bohm * shape;
+    };
+    int conservation_gi = -1;
+    int highest_h2plus_v = -1;
+    for (int gi : boundary.ion_indices) {
+        const auto& level = levels[static_cast<size_t>(gi)];
+        if (level.atomicity >= 2 && level.internal_id > highest_h2plus_v) {
+            conservation_gi = gi;
+            highest_h2plus_v = level.internal_id;
+        }
+    }
+    require(conservation_gi >= 0,
+            "Highest-v H2+ conservation row was not found");
+    for (int gi : boundary.ion_indices) {
+        if (gi == conservation_gi) continue;
+        const auto position = std::find(
+            boundary.P_indices.begin(), boundary.P_indices.end(), gi);
+        require(position != boundary.P_indices.end(),
+                "Positive ion is missing from the background block");
+        const int pi = static_cast<int>(position - boundary.P_indices.begin());
+        const double transport =
+            (-ion_velocity(gi, ion_dx_cm) * individual_ion_step.nP_new(pi) +
+             ion_velocity(gi, 0.0) * nP(pi)) / ion_dx_cm;
+        const double source = individual_chemistry(pi);
+        const double scale = std::max({1.0, std::abs(transport), std::abs(source)});
+        const double relative_error = std::abs(transport - source) / scale;
+        if (relative_error >= 1e-5) {
+            std::cerr << "Flux residual row=" << levels[static_cast<size_t>(gi)].label
+                      << " relative_error=" << relative_error << "\n";
+        }
+        require(relative_error < 1e-5,
+                "A positive-ion row did not satisfy its implicit flux divergence");
+    }
+
     std::cout << "[PASS] Marching implicit one-step checks.\n";
     return 0;
 }

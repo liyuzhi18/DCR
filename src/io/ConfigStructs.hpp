@@ -103,6 +103,8 @@ namespace dcr::io {
             base::Real ion_velocity_floor_fraction = 1e-2;
             std::string neutral_partition_mode = "nuclei_fraction";
             bool apply_ion_closure = false;
+            // fixed_density, variable_nuclei_balance (July 29 hybrid), or
+            // individual_ion_flux_divergence (target-conditioned per-ion march).
             std::string closure_mode = "fixed_density";
         };
 

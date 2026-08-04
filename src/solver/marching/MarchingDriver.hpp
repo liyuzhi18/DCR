@@ -21,6 +21,9 @@ struct MarchingHistory {
     std::vector<double> cell_elapsed_seconds;
     std::vector<int> cell_iterations;
     std::vector<int> cell_converged;
+    std::vector<double> cell_final_relative_change;
+    std::vector<double> cell_final_residual_relative;
+    std::vector<double> cell_final_map_residual_norm;
     // Background populations on full state indexing at each node.
     // Shape conceptually: [num_cells, total_states].
     std::vector<dcr::base::Vector> background_full;
@@ -63,15 +66,20 @@ struct MarchingHistory {
     std::vector<double> adaptive_outer_LM_history_cm;
     std::vector<double> adaptive_outer_F_A_end_history;
     std::vector<double> adaptive_outer_F_M_end_history;
-    // Per-node diagnostics for closure_mode=variable_nuclei_balance.
+    // Per-node aggregate transport/exhaust diagnostics.
     // Entry 0 is NaN because the backward/upwind balance applies to cells k>0.
     bool variable_nuclei_balance_enabled = false;
+    bool individual_ion_flux_divergence_enabled = false;
     std::vector<double> variable_ion_divergence_nuclei_cm3_s;
     std::vector<double> variable_flowA_divergence_nuclei_cm3_s;
     std::vector<double> variable_flowM_divergence_nuclei_cm3_s;
     std::vector<double> variable_neutral_exhaust_nuclei_cm3_s;
     std::vector<double> variable_balance_rhs_cm3_s;
     std::vector<double> variable_balance_residual_cm3_s;
+    std::vector<double> individual_hminus_omitted_residual_cm3_s;
+    std::vector<double> individual_nuclei_weighted_species_residual_cm3_s;
+    std::vector<double> individual_nuclei_identity_relative_error;
+    std::vector<int> individual_nuclei_identity_consistent;
     // Local prescribed-nuclei closure diagnostics. Entry 0 is NaN because L_I
     // is derived independently in each marched cell.
     std::vector<double> prescribed_nuclei_density_cm3;

@@ -272,13 +272,25 @@ MarchingHistory run_full_marching(
 
     const bool variable_nuclei_balance_closure =
         config.numerics.adaptive_recycling_domain.closure_mode == "variable_nuclei_balance";
+    const bool individual_ion_flux_divergence_closure =
+        config.numerics.adaptive_recycling_domain.closure_mode ==
+            "individual_ion_flux_divergence";
+    const bool aggregate_nuclei_diagnostics =
+        variable_nuclei_balance_closure || individual_ion_flux_divergence_closure;
     history.variable_nuclei_balance_enabled = variable_nuclei_balance_closure;
+    history.individual_ion_flux_divergence_enabled =
+        individual_ion_flux_divergence_closure;
     if (config.io.verbose_logging) {
-        std::cout << "[DCR_Solver] Marching mode: "
-                  << (variable_nuclei_balance_closure
-                          ? "hybrid variable nuclei-balance closure"
-                          : "fixed prescribed-density closure")
-                  << "\n";
+        std::cout << "[DCR_Solver] Marching mode: ";
+        if (individual_ion_flux_divergence_closure) {
+            std::cout << "individual positive-ion transport with exact weighted-sum "
+                         "highest-v H2+ row";
+        } else if (variable_nuclei_balance_closure) {
+            std::cout << "hybrid variable nuclei-balance closure";
+        } else {
+            std::cout << "fixed prescribed-density closure";
+        }
+        std::cout << "\n";
     }
 
     const AtomicRateCalculator rate_calculator(atomic_data);
@@ -323,13 +335,15 @@ MarchingHistory run_full_marching(
     history.cell_elapsed_seconds.reserve(dx.size());
     history.cell_iterations.reserve(dx.size());
     history.cell_converged.reserve(dx.size());
-    if (variable_nuclei_balance_closure) {
+    if (aggregate_nuclei_diagnostics) {
         history.variable_ion_divergence_nuclei_cm3_s.reserve(static_cast<size_t>(n_nodes));
         history.variable_flowA_divergence_nuclei_cm3_s.reserve(static_cast<size_t>(n_nodes));
         history.variable_flowM_divergence_nuclei_cm3_s.reserve(static_cast<size_t>(n_nodes));
         history.variable_neutral_exhaust_nuclei_cm3_s.reserve(static_cast<size_t>(n_nodes));
         history.variable_balance_rhs_cm3_s.reserve(static_cast<size_t>(n_nodes));
         history.variable_balance_residual_cm3_s.reserve(static_cast<size_t>(n_nodes));
+    }
+    if (variable_nuclei_balance_closure) {
         history.prescribed_nuclei_density_cm3.reserve(static_cast<size_t>(n_nodes));
         history.recycling_source_nuclei_cm3_s.reserve(static_cast<size_t>(n_nodes));
         history.local_atom_exhaust_nuclei_cm3_s.reserve(static_cast<size_t>(n_nodes));
@@ -337,12 +351,22 @@ MarchingHistory run_full_marching(
         history.ion_divergence_closure_nuclei_cm3_s.reserve(static_cast<size_t>(n_nodes));
         history.ion_balance_coefficient_s.reserve(static_cast<size_t>(n_nodes));
     }
+    if (individual_ion_flux_divergence_closure) {
+        history.individual_hminus_omitted_residual_cm3_s.reserve(
+            static_cast<size_t>(n_nodes));
+        history.individual_nuclei_weighted_species_residual_cm3_s.reserve(
+            static_cast<size_t>(n_nodes));
+        history.individual_nuclei_identity_relative_error.reserve(
+            static_cast<size_t>(n_nodes));
+        history.individual_nuclei_identity_consistent.reserve(
+            static_cast<size_t>(n_nodes));
+    }
 
     const dcr::base::Vector bg_full_boundary = make_background_full(nP, boundary, total_states);
     history.background_full.push_back(bg_full_boundary);
     history.flowA.push_back(flowA);
     history.flowM.push_back(flowM);
-    if (variable_nuclei_balance_closure) {
+    if (aggregate_nuclei_diagnostics) {
         const double nan = std::numeric_limits<double>::quiet_NaN();
         history.variable_ion_divergence_nuclei_cm3_s.push_back(nan);
         history.variable_flowA_divergence_nuclei_cm3_s.push_back(nan);
@@ -350,12 +374,22 @@ MarchingHistory run_full_marching(
         history.variable_neutral_exhaust_nuclei_cm3_s.push_back(nan);
         history.variable_balance_rhs_cm3_s.push_back(nan);
         history.variable_balance_residual_cm3_s.push_back(nan);
+    }
+    if (variable_nuclei_balance_closure) {
+        const double nan = std::numeric_limits<double>::quiet_NaN();
         history.prescribed_nuclei_density_cm3.push_back(config.plasma.total_density);
         history.recycling_source_nuclei_cm3_s.push_back(nan);
         history.local_atom_exhaust_nuclei_cm3_s.push_back(nan);
         history.local_molecule_exhaust_nuclei_cm3_s.push_back(nan);
         history.ion_divergence_closure_nuclei_cm3_s.push_back(nan);
         history.ion_balance_coefficient_s.push_back(nan);
+    }
+    if (individual_ion_flux_divergence_closure) {
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        history.individual_hminus_omitted_residual_cm3_s.push_back(nan);
+        history.individual_nuclei_weighted_species_residual_cm3_s.push_back(nan);
+        history.individual_nuclei_identity_relative_error.push_back(nan);
+        history.individual_nuclei_identity_consistent.push_back(-1);
     }
     const auto boundary_local = assemble_local_system(
         config, atomic_data, plasma, grid, boundary, bg_full_boundary, flowA, flowM, 0.0
@@ -405,6 +439,9 @@ MarchingHistory run_full_marching(
         history.cell_elapsed_seconds.push_back(step.elapsed_seconds);
         history.cell_iterations.push_back(step.iterations);
         history.cell_converged.push_back(step.converged ? 1 : 0);
+        history.cell_final_relative_change.push_back(step.final_rel);
+        history.cell_final_residual_relative.push_back(step.final_resid_rel);
+        history.cell_final_map_residual_norm.push_back(step.final_map_residual_norm);
 
         if (config.io.verbose_logging) {
             if (!step.converged) {
@@ -423,7 +460,7 @@ MarchingHistory run_full_marching(
         history.background_full.push_back(bg_full);
         history.flowA.push_back(flowA);
         history.flowM.push_back(flowM);
-        if (variable_nuclei_balance_closure) {
+        if (aggregate_nuclei_diagnostics) {
             history.variable_ion_divergence_nuclei_cm3_s.push_back(
                 step.variable_ion_divergence_nuclei_cm3_s);
             history.variable_flowA_divergence_nuclei_cm3_s.push_back(
@@ -436,6 +473,8 @@ MarchingHistory run_full_marching(
                 step.variable_balance_rhs_cm3_s);
             history.variable_balance_residual_cm3_s.push_back(
                 step.variable_balance_residual_cm3_s);
+        }
+        if (variable_nuclei_balance_closure) {
             history.prescribed_nuclei_density_cm3.push_back(
                 step.prescribed_nuclei_density_cm3);
             history.recycling_source_nuclei_cm3_s.push_back(
@@ -448,6 +487,16 @@ MarchingHistory run_full_marching(
                 step.ion_divergence_closure_nuclei_cm3_s);
             history.ion_balance_coefficient_s.push_back(
                 step.ion_balance_coefficient_s);
+        }
+        if (individual_ion_flux_divergence_closure) {
+            history.individual_hminus_omitted_residual_cm3_s.push_back(
+                step.individual_hminus_omitted_residual_cm3_s);
+            history.individual_nuclei_weighted_species_residual_cm3_s.push_back(
+                step.individual_nuclei_weighted_species_residual_cm3_s);
+            history.individual_nuclei_identity_relative_error.push_back(
+                step.individual_nuclei_identity_relative_error);
+            history.individual_nuclei_identity_consistent.push_back(
+                step.individual_nuclei_identity_consistent ? 1 : 0);
         }
         const double h2plus_transport_rate = molecular_transport_loss_rate(
             boundary,
@@ -482,10 +531,13 @@ MarchingHistory run_full_marching(
         if (config.io.verbose_logging) {
             log_rate_snapshot(x_right, history.rate_diagnostics.back(), levels);
         }
-        if (variable_nuclei_balance_closure && config.io.verbose_logging) {
+        if (aggregate_nuclei_diagnostics && config.io.verbose_logging) {
             const auto summary = summarize_subpopulations(bg_full, flowA, flowM, boundary, levels);
             const auto local_temps = evaluate_plasma_temperatures(config, x_right);
-            std::cout << "[DCR_Solver][variable-progress] cell=" << cell_index
+            std::cout << (individual_ion_flux_divergence_closure
+                              ? "[DCR_Solver][individual-progress] cell="
+                              : "[DCR_Solver][variable-progress] cell=")
+                      << cell_index
                       << "/" << (n_nodes - 1)
                       << " x=" << x_right
                       << " cm"
@@ -503,9 +555,22 @@ MarchingHistory run_full_marching(
                       << " H-=" << summary.H_minus
                       << " flowA=" << positive_sum(flowA)
                       << " flowM=" << positive_sum(flowM)
-                      << " nuclei_total=" << summary.nuclei_total
-                      << " L_I=" << step.ion_divergence_closure_nuclei_cm3_s
-                      << "\n";
+                      << " nuclei_total=" << summary.nuclei_total;
+            if (individual_ion_flux_divergence_closure) {
+                std::cout << " R_nuc=" << step.variable_balance_residual_cm3_s
+                          << " Hminus_residual="
+                          << step.individual_hminus_omitted_residual_cm3_s
+                          << " R_sigma="
+                          << step.individual_nuclei_weighted_species_residual_cm3_s
+                          << " identity_rel="
+                          << step.individual_nuclei_identity_relative_error
+                          << " model_tol=" << kIndividualIonNucleiModelingTolerance
+                          << " consistent="
+                          << (step.individual_nuclei_identity_consistent ? 1 : 0);
+            } else {
+                std::cout << " L_I=" << step.ion_divergence_closure_nuclei_cm3_s;
+            }
+            std::cout << "\n";
             std::cout.flush();
         }
     }

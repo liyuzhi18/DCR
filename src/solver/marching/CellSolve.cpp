@@ -4,6 +4,7 @@
 #include "../../physics/Sheath.hpp"
 #include "../core/TemperatureProfile.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -46,12 +47,19 @@ struct BackgroundSolveResult {
     double linear_mse = std::numeric_limits<double>::quiet_NaN();
     double linear_mse_rel = std::numeric_limits<double>::quiet_NaN();
     bool variable_nuclei_balance_closure = false;
+    bool individual_ion_flux_divergence_closure = false;
     double variable_ion_divergence_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
     double variable_flowA_divergence_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
     double variable_flowM_divergence_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
     double variable_neutral_exhaust_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
     double variable_balance_rhs = std::numeric_limits<double>::quiet_NaN();
     double variable_balance_residual = std::numeric_limits<double>::quiet_NaN();
+    double individual_hminus_omitted_residual = std::numeric_limits<double>::quiet_NaN();
+    double individual_nuclei_weighted_species_residual =
+        std::numeric_limits<double>::quiet_NaN();
+    double individual_nuclei_identity_relative_error =
+        std::numeric_limits<double>::quiet_NaN();
+    bool individual_nuclei_identity_consistent = false;
     double prescribed_nuclei_density_cm3 = std::numeric_limits<double>::quiet_NaN();
     double recycling_source_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
     double local_atom_exhaust_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
@@ -182,9 +190,15 @@ BackgroundSolveResult solve_background_at_cell(
     int adaptive_profile_node_index) {
 
     BackgroundSolveResult result;
+    const bool individual_ion_flux_divergence_closure =
+        config.numerics.adaptive_recycling_domain.closure_mode ==
+            "individual_ion_flux_divergence";
     const bool variable_nuclei_balance_closure =
-        config.numerics.adaptive_recycling_domain.closure_mode == "variable_nuclei_balance";
+        config.numerics.adaptive_recycling_domain.closure_mode == "variable_nuclei_balance" ||
+        individual_ion_flux_divergence_closure;
     result.variable_nuclei_balance_closure = variable_nuclei_balance_closure;
+    result.individual_ion_flux_divergence_closure =
+        individual_ion_flux_divergence_closure;
     (void)nP_floor_ref;
     const int Pn = static_cast<int>(boundary.P_indices.size());
     if (Pn == 0) {
@@ -198,6 +212,36 @@ BackgroundSolveResult solve_background_at_cell(
         if (gi >= 0 && gi < static_cast<int>(levels.size())) {
             p_pos[static_cast<size_t>(gi)] = i;
         }
+    }
+    int hminus_pi = -1;
+    int last_h2plus_pi = -1;
+    int last_h2plus_v = -1;
+    for (int pi = 0; pi < Pn; ++pi) {
+        const int gi = boundary.P_indices[static_cast<size_t>(pi)];
+        if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
+        const auto& level = levels[static_cast<size_t>(gi)];
+        if (level.type == dcr::atomic::SpeciesType::Ion &&
+            level.charge < 0 && level.atomicity == 1) {
+            if (hminus_pi >= 0) {
+                throw std::runtime_error(
+                    "individual_ion_flux_divergence requires a unique H- background row");
+            }
+            hminus_pi = pi;
+        }
+        if (level.type == dcr::atomic::SpeciesType::Ion &&
+            level.charge > 0 && level.atomicity >= 2 &&
+            level.internal_id > last_h2plus_v) {
+            last_h2plus_pi = pi;
+            last_h2plus_v = level.internal_id;
+        }
+    }
+    if (individual_ion_flux_divergence_closure && hminus_pi < 0) {
+        throw std::runtime_error(
+            "individual_ion_flux_divergence requires an H- background row");
+    }
+    if (individual_ion_flux_divergence_closure && last_h2plus_pi < 0) {
+        throw std::runtime_error(
+            "individual_ion_flux_divergence requires an H2+ background row");
     }
 
     const dcr::base::Vector bg_full = make_background_full(
@@ -261,7 +305,7 @@ BackgroundSolveResult solve_background_at_cell(
         : std::numeric_limits<double>::quiet_NaN();
 
     dcr::base::Matrix loss = dcr::base::Matrix::Zero(Pn, Pn);
-    if (ion_nuclei_density > 0.0) {
+    if (!individual_ion_flux_divergence_closure && ion_nuclei_density > 0.0) {
         for (int gi : boundary.ion_indices) {
             const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
                 ? p_pos[static_cast<size_t>(gi)] : -1;
@@ -355,11 +399,37 @@ BackgroundSolveResult solve_background_at_cell(
     const double flowM_exhaust_nuclei = (molecule_speed / width) *
         nuclei_sum(flowM_new, boundary.M_indices, levels);
     const double flow_exhaust_nuclei = flowA_exhaust_nuclei + flowM_exhaust_nuclei;
+    const auto weighted_flow_equation_residual = [&] (
+        const dcr::base::Vector& current,
+        const dcr::base::Vector& previous,
+        const std::vector<int>& indices,
+        double velocity,
+        double exhaust_speed) {
+        const dcr::base::Matrix block = extract_R_PP(local_system.R_full, indices);
+        const dcr::base::Vector chemistry = block * current;
+        double weighted = 0.0;
+        for (int i = 0; i < current.size(); ++i) {
+            const int gi = indices[static_cast<size_t>(i)];
+            if (gi < 0 || gi >= static_cast<int>(levels.size())) continue;
+            const double mu = static_cast<double>(
+                std::max(1, levels[static_cast<size_t>(gi)].atomicity));
+            weighted += mu * (
+                velocity * (current(i) - previous(i)) / dx_cm +
+                exhaust_speed / width * current(i) - chemistry(i));
+        }
+        return weighted;
+    };
+    const double flowA_equation_residual = weighted_flow_equation_residual(
+        flowA_new, flowA_old, boundary.A_indices, boundary.u_A, flow_atom_speed);
+    const double flowM_equation_residual = weighted_flow_equation_residual(
+        flowM_new, flowM_old, boundary.M_indices, boundary.u_M, molecule_speed);
     const double ion_flux_left_nuclei = ion_nuclei_flux(nP_old, x_left_cm);
     dcr::base::Vector closure_row = atomicity;
     const double flow_nuclei = nuclei_sum(flowA_new, boundary.A_indices, levels) +
         nuclei_sum(flowM_new, boundary.M_indices, levels);
     double closure_rhs = std::max(0.0, config.plasma.total_density - flow_nuclei);
+    dcr::base::Vector exact_nuclei_sum_row = dcr::base::Vector::Zero(Pn);
+    double exact_nuclei_sum_rhs = 0.0;
     if (variable_nuclei_balance_closure) {
         closure_row.setZero();
         if (dx_cm > 0.0) {
@@ -392,16 +462,45 @@ BackgroundSolveResult solve_background_at_cell(
         result.variable_flowM_divergence_nuclei_cm3_s = flowM_div_nuclei;
         result.variable_balance_rhs = closure_rhs;
     }
-    const int constraint_row = std::min(1, Pn - 1);
-    replaced.row(constraint_row) = closure_row.transpose();
-    rhs(constraint_row) = closure_rhs;
+    if (individual_ion_flux_divergence_closure) {
+        if (!(dx_cm > 0.0)) {
+            throw std::runtime_error(
+                "individual_ion_flux_divergence requires a positive cell width");
+        }
+        for (int gi : boundary.ion_indices) {
+            const int pi = (gi >= 0 && gi < static_cast<int>(p_pos.size()))
+                ? p_pos[static_cast<size_t>(gi)] : -1;
+            if (pi < 0 || pi >= nP_old.size()) continue;
+            replaced.row(pi) = Rpp.row(pi);
+            replaced(pi, pi) += ion_velocity(gi, x_right_cm) / dx_cm;
+            rhs(pi) = ion_velocity(gi, x_left_cm) * nP_old(pi) / dx_cm -
+                local_system.S_background(pi);
+        }
+        // Sum every original P row before replacing the highest-v H2+ row. The
+        // A/M residuals use the opposite matrix convention, so their rate-form
+        // sums enter the RHS.
+        exact_nuclei_sum_row = replaced.transpose() * atomicity;
+        exact_nuclei_sum_rhs = atomicity.dot(rhs) +
+            flowA_equation_residual + flowM_equation_residual;
+        replaced.row(last_h2plus_pi) = exact_nuclei_sum_row.transpose();
+        rhs(last_h2plus_pi) = exact_nuclei_sum_rhs;
+    } else {
+        const int constraint_row = std::min(1, Pn - 1);
+        replaced.row(constraint_row) = closure_row.transpose();
+        rhs(constraint_row) = closure_rhs;
+    }
 
     auto set_original_diag = [&](const dcr::base::Vector& n_eval) {
-        const dcr::base::Vector r = Rpp * n_eval -
-            (loss * n_eval - local_system.S_background);
+        dcr::base::Vector r;
+        if (individual_ion_flux_divergence_closure) {
+            r = replaced * n_eval - rhs;
+        } else {
+            r = Rpp * n_eval - (loss * n_eval - local_system.S_background);
+        }
         result.linear_residual_norm = r.norm();
         result.linear_mse = r.squaredNorm() / static_cast<double>(Pn);
-        const double lhs_norm = (Rpp * n_eval).norm();
+        const double lhs_norm = individual_ion_flux_divergence_closure
+            ? (replaced * n_eval).norm() : (Rpp * n_eval).norm();
         result.linear_mse_rel = result.linear_residual_norm / std::max(1.0, lhs_norm);
         if (variable_nuclei_balance_closure) {
             const double ion_divergence = dx_cm > 0.0
@@ -429,6 +528,32 @@ BackgroundSolveResult solve_background_at_cell(
                 local_exhaust + flow_exhaust_nuclei;
             result.variable_balance_residual = ion_divergence + flowA_div_nuclei +
                 flowM_div_nuclei + local_exhaust + flow_exhaust_nuclei;
+            if (individual_ion_flux_divergence_closure) {
+                const dcr::base::Vector chemistry =
+                    Rpp * n_eval + local_system.S_background;
+                result.individual_hminus_omitted_residual = chemistry(hminus_pi);
+                const double weighted_species_residual =
+                    exact_nuclei_sum_rhs - exact_nuclei_sum_row.dot(n_eval);
+                result.individual_nuclei_weighted_species_residual =
+                    weighted_species_residual;
+
+                const double identity_scale = std::max({
+                    1.0,
+                    std::abs(weighted_species_residual),
+                    std::abs(result.variable_balance_residual),
+                    std::abs(ion_divergence),
+                    std::abs(flowA_div_nuclei),
+                    std::abs(flowM_div_nuclei),
+                    std::abs(local_exhaust),
+                    std::abs(flow_exhaust_nuclei)
+                });
+                result.individual_nuclei_identity_relative_error =
+                    std::abs(weighted_species_residual -
+                             result.variable_balance_residual) / identity_scale;
+                result.individual_nuclei_identity_consistent =
+                    result.individual_nuclei_identity_relative_error <=
+                        kIndividualIonNucleiModelingTolerance;
+            }
         }
     };
 
@@ -469,12 +594,22 @@ BackgroundSolveResult solve_background_at_cell(
 void copy_variable_nuclei_diagnostics(CellImplicitResult& result,
                                       const BackgroundSolveResult& bg_solve) {
     result.variable_nuclei_balance_closure = bg_solve.variable_nuclei_balance_closure;
+    result.individual_ion_flux_divergence_closure =
+        bg_solve.individual_ion_flux_divergence_closure;
     result.variable_ion_divergence_nuclei_cm3_s = bg_solve.variable_ion_divergence_nuclei_cm3_s;
     result.variable_flowA_divergence_nuclei_cm3_s = bg_solve.variable_flowA_divergence_nuclei_cm3_s;
     result.variable_flowM_divergence_nuclei_cm3_s = bg_solve.variable_flowM_divergence_nuclei_cm3_s;
     result.variable_neutral_exhaust_nuclei_cm3_s = bg_solve.variable_neutral_exhaust_nuclei_cm3_s;
     result.variable_balance_rhs_cm3_s = bg_solve.variable_balance_rhs;
     result.variable_balance_residual_cm3_s = bg_solve.variable_balance_residual;
+    result.individual_hminus_omitted_residual_cm3_s =
+        bg_solve.individual_hminus_omitted_residual;
+    result.individual_nuclei_weighted_species_residual_cm3_s =
+        bg_solve.individual_nuclei_weighted_species_residual;
+    result.individual_nuclei_identity_relative_error =
+        bg_solve.individual_nuclei_identity_relative_error;
+    result.individual_nuclei_identity_consistent =
+        bg_solve.individual_nuclei_identity_consistent;
     result.prescribed_nuclei_density_cm3 = bg_solve.prescribed_nuclei_density_cm3;
     result.recycling_source_nuclei_cm3_s = bg_solve.recycling_source_nuclei_cm3_s;
     result.local_atom_exhaust_nuclei_cm3_s = bg_solve.local_atom_exhaust_nuclei_cm3_s;
@@ -683,12 +818,15 @@ CellImplicitResult solve_cell_implicit(
     const double omega_recover_cap = std::min(omega_init, 1.0e-1);
     const auto cell_temperatures = evaluate_plasma_temperatures(config, x_right_cm);
     const bool variable_nuclei_balance_closure =
-        config.numerics.adaptive_recycling_domain.closure_mode == "variable_nuclei_balance";
+        config.numerics.adaptive_recycling_domain.closure_mode == "variable_nuclei_balance" ||
+        config.numerics.adaptive_recycling_domain.closure_mode ==
+            "individual_ion_flux_divergence";
     const auto should_log_iteration_record = [&](int iter) {
         return detailed_log && (config.io.verbose_logging || (iter + 1) > slow_iter_threshold);
     };
     double last_rel = std::numeric_limits<double>::infinity();
     double last_resid_rel = std::numeric_limits<double>::infinity();
+    double last_map_residual_norm = std::numeric_limits<double>::infinity();
 
     const int nP_size = nP_iter.size();
     const int nA_size = flowA_iter.size();
@@ -819,10 +957,11 @@ CellImplicitResult solve_cell_implicit(
                                const dcr::base::Vector& flowA_final,
                                const dcr::base::Vector& flowM_final,
                                int iterations,
-                               bool converged,
-                               double final_rel,
-                               double final_resid_rel,
-                               const BackgroundSolveResult* bg_solve_diag) {
+                                bool converged,
+                                double final_rel,
+                                double final_resid_rel,
+                                double final_map_residual_norm,
+                                const BackgroundSolveResult* bg_solve_diag) {
         result.nP_new = nP_final.cwiseMax(0.0);
         result.flowA_new = flowA_final.cwiseMax(0.0);
         result.flowM_new = flowM_final.cwiseMax(0.0);
@@ -853,6 +992,7 @@ CellImplicitResult solve_cell_implicit(
         );
         result.final_rel = final_rel;
         result.final_resid_rel = final_resid_rel;
+        result.final_map_residual_norm = final_map_residual_norm;
         result.elapsed_seconds = elapsed_seconds_since(solve_timer_start);
         if (bg_solve_diag != nullptr) {
             copy_variable_nuclei_diagnostics(result, *bg_solve_diag);
@@ -943,6 +1083,7 @@ CellImplicitResult solve_cell_implicit(
             have_final_bg_solve_diag = true;
             last_rel = eval.rel;
             last_resid_rel = eval.resid_rel;
+            last_map_residual_norm = eval.residual.norm();
 
             if (should_log_iteration_record(iter)) {
                 const double flowA_sum_iter = positive_sum(eval.flowA_image);
@@ -974,7 +1115,23 @@ CellImplicitResult solve_cell_implicit(
                           << ", M=" << flowM_sum_iter
                           << "}"
                           << "\n";
-                if (eval.bg_solve.variable_nuclei_balance_closure) {
+                if (eval.bg_solve.individual_ion_flux_divergence_closure) {
+                    std::cout << "[DCR_Solver][individual-ion-flux] cell " << cell_index
+                              << " ion_div=" << eval.bg_solve.variable_ion_divergence_nuclei_cm3_s
+                              << " flowA_div=" << eval.bg_solve.variable_flowA_divergence_nuclei_cm3_s
+                              << " flowM_div=" << eval.bg_solve.variable_flowM_divergence_nuclei_cm3_s
+                              << " neutral_exhaust=" << eval.bg_solve.variable_neutral_exhaust_nuclei_cm3_s
+                              << " R_nuc=" << eval.bg_solve.variable_balance_residual
+                              << " Hminus_residual=" << eval.bg_solve.individual_hminus_omitted_residual
+                              << " R_sigma="
+                              << eval.bg_solve.individual_nuclei_weighted_species_residual
+                              << " identity_rel="
+                              << eval.bg_solve.individual_nuclei_identity_relative_error
+                              << " model_tol=" << kIndividualIonNucleiModelingTolerance
+                              << " consistent="
+                              << (eval.bg_solve.individual_nuclei_identity_consistent ? 1 : 0)
+                              << "\n";
+                } else if (eval.bg_solve.variable_nuclei_balance_closure) {
                     std::cout << "[DCR_Solver][variable-nuclei] cell " << cell_index
                               << " ion_div=" << eval.bg_solve.variable_ion_divergence_nuclei_cm3_s
                               << " flowA_div=" << eval.bg_solve.variable_flowA_divergence_nuclei_cm3_s
@@ -1137,7 +1294,7 @@ CellImplicitResult solve_cell_implicit(
 
         unpack_state(project_state(x_work), nP_iter, flowA_iter, flowM_iter);
         finalize_output(out, nP_iter, flowA_iter, flowM_iter, iterations, converged,
-                        last_rel, last_resid_rel,
+                        last_rel, last_resid_rel, last_map_residual_norm,
                         have_final_bg_solve_diag ? &final_bg_solve_diag : nullptr);
         return out;
     }
@@ -1205,6 +1362,7 @@ CellImplicitResult solve_cell_implicit(
         // Build current/fixed-point state vectors.
         const dcr::base::Vector xk = pack_state(nP_iter, flowA_iter, flowM_iter);
         const dcr::base::Vector gk = pack_state(nP_new, flowA_new, flowM_new);
+        last_map_residual_norm = (xk - gk).norm();
 
         // Damped candidate with simple 2-cycle rejection. In stiff cases the
         // accepted iterate can alternate between two quasi-neutral states; if
@@ -1377,7 +1535,23 @@ CellImplicitResult solve_cell_implicit(
                       << ", M=" << flowM_nuc_iter
                       << "}"
                       << "\n";
-            if (bg_solve.variable_nuclei_balance_closure) {
+            if (bg_solve.individual_ion_flux_divergence_closure) {
+                std::cout << "[DCR_Solver][individual-ion-flux] cell " << cell_index
+                          << " ion_div=" << bg_solve.variable_ion_divergence_nuclei_cm3_s
+                          << " flowA_div=" << bg_solve.variable_flowA_divergence_nuclei_cm3_s
+                          << " flowM_div=" << bg_solve.variable_flowM_divergence_nuclei_cm3_s
+                          << " neutral_exhaust=" << bg_solve.variable_neutral_exhaust_nuclei_cm3_s
+                          << " R_nuc=" << bg_solve.variable_balance_residual
+                          << " Hminus_residual=" << bg_solve.individual_hminus_omitted_residual
+                          << " R_sigma="
+                          << bg_solve.individual_nuclei_weighted_species_residual
+                          << " identity_rel="
+                          << bg_solve.individual_nuclei_identity_relative_error
+                          << " model_tol=" << kIndividualIonNucleiModelingTolerance
+                          << " consistent="
+                          << (bg_solve.individual_nuclei_identity_consistent ? 1 : 0)
+                          << "\n";
+            } else if (bg_solve.variable_nuclei_balance_closure) {
                 std::cout << "[DCR_Solver][variable-nuclei] cell " << cell_index
                           << " ion_div=" << bg_solve.variable_ion_divergence_nuclei_cm3_s
                           << " flowA_div=" << bg_solve.variable_flowA_divergence_nuclei_cm3_s
@@ -1409,7 +1583,7 @@ CellImplicitResult solve_cell_implicit(
     }
 
     finalize_output(out, nP_iter, flowA_iter, flowM_iter, out.iterations,
-                    out.converged, last_rel, last_resid_rel,
+                    out.converged, last_rel, last_resid_rel, last_map_residual_norm,
                     have_final_bg_solve_diag ? &final_bg_solve_diag : nullptr);
     return out;
 }

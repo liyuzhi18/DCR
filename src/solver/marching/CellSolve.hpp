@@ -13,6 +13,8 @@
 
 namespace dcr::solver {
 
+inline constexpr double kIndividualIonNucleiModelingTolerance = 1.0e-3;
+
 // Result container for one implicit cell solve (k -> k+1).
 struct CellImplicitResult {
     dcr::base::Vector nP_new;
@@ -22,16 +24,25 @@ struct CellImplicitResult {
     bool converged = false;
     double final_rel = 0.0;
     double final_resid_rel = 0.0;
+    double final_map_residual_norm = 0.0;
     double elapsed_seconds = 0.0;
     LocalSystem local_final;
     FlowAdvanceResult flow_final;
     bool variable_nuclei_balance_closure = false;
+    bool individual_ion_flux_divergence_closure = false;
     double variable_ion_divergence_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
     double variable_flowA_divergence_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
     double variable_flowM_divergence_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
     double variable_neutral_exhaust_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
     double variable_balance_rhs_cm3_s = std::numeric_limits<double>::quiet_NaN();
     double variable_balance_residual_cm3_s = std::numeric_limits<double>::quiet_NaN();
+    double individual_hminus_omitted_residual_cm3_s =
+        std::numeric_limits<double>::quiet_NaN();
+    double individual_nuclei_weighted_species_residual_cm3_s =
+        std::numeric_limits<double>::quiet_NaN();
+    double individual_nuclei_identity_relative_error =
+        std::numeric_limits<double>::quiet_NaN();
+    bool individual_nuclei_identity_consistent = false;
     double prescribed_nuclei_density_cm3 = std::numeric_limits<double>::quiet_NaN();
     double recycling_source_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
     double local_atom_exhaust_nuclei_cm3_s = std::numeric_limits<double>::quiet_NaN();
@@ -48,7 +59,10 @@ dcr::base::Vector make_background_full(const dcr::base::Vector& nP,
 // Coupled fixed-point implicit solve for one spatial cell:
 // unknowns are (nP_{k+1}, nA_{k+1}, nM_{k+1}), with rates evaluated at x_{k+1}.
 // Fixed mode enforces prescribed local nuclei density. Variable mode replaces
-// one CR row with a backward/upwind balance using prescribed ion velocities.
+// one CR row with an aggregate balance. Individual-ion mode retains every
+// positive-ion prescribed-velocity row except the highest-v H2+ row, which is
+// replaced with the exact nuclei-weighted sum of the original species rows.
+// The separately assembled aggregate transport/exhaust balance is diagnostic only.
 CellImplicitResult solve_cell_implicit(
     const dcr::io::Config& config,
     const dcr::atomic::AtomicData& atomic_data,

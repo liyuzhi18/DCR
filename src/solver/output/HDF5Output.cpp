@@ -1,4 +1,5 @@
 #include "HDF5Output.hpp"
+#include "../marching/CellSolve.hpp"
 
 #include <H5Cpp.h>
 
@@ -502,12 +503,50 @@ void write_hdf5_output(
         write_vector_double(file, "/variable_nuclei/ion_balance_coefficient_s",
                             history.ion_balance_coefficient_s);
     }
+    if (history.individual_ion_flux_divergence_enabled) {
+        file.createGroup("/individual_ion_flux");
+        write_scalar_int(file, "/individual_ion_flux/enabled", 1);
+        write_scalar_double(file, "/individual_ion_flux/modeling_tolerance",
+                            kIndividualIonNucleiModelingTolerance);
+        write_vector_double(file, "/individual_ion_flux/background_nuclei_cm3",
+                            build_background_nuclei_profile(history.background_full, levels));
+        write_vector_double(file, "/individual_ion_flux/flowA_nuclei_cm3",
+                            build_compact_nuclei_profile(history.flowA, boundary.A_indices, levels));
+        write_vector_double(file, "/individual_ion_flux/flowM_nuclei_cm3",
+                            build_compact_nuclei_profile(history.flowM, boundary.M_indices, levels));
+        write_vector_double(file, "/individual_ion_flux/total_nuclei_cm3", n_nuclei_cm3);
+        write_vector_double(file, "/individual_ion_flux/ion_divergence_nuclei_cm3_s",
+                            history.variable_ion_divergence_nuclei_cm3_s);
+        write_vector_double(file, "/individual_ion_flux/flowA_divergence_nuclei_cm3_s",
+                            history.variable_flowA_divergence_nuclei_cm3_s);
+        write_vector_double(file, "/individual_ion_flux/flowM_divergence_nuclei_cm3_s",
+                            history.variable_flowM_divergence_nuclei_cm3_s);
+        write_vector_double(file, "/individual_ion_flux/neutral_exhaust_nuclei_cm3_s",
+                            history.variable_neutral_exhaust_nuclei_cm3_s);
+        write_vector_double(file, "/individual_ion_flux/conservation_residual_cm3_s",
+                            history.variable_balance_residual_cm3_s);
+        write_vector_double(file, "/individual_ion_flux/hminus_equation_residual_cm3_s",
+                            history.individual_hminus_omitted_residual_cm3_s);
+        write_vector_double(file,
+                            "/individual_ion_flux/nuclei_weighted_species_residual_cm3_s",
+                            history.individual_nuclei_weighted_species_residual_cm3_s);
+        write_vector_double(file, "/individual_ion_flux/identity_relative_error",
+                            history.individual_nuclei_identity_relative_error);
+        write_vector_int(file, "/individual_ion_flux/identity_consistent",
+                         history.individual_nuclei_identity_consistent);
+    }
 
     write_scalar_double(file, "/timing/boundary_elapsed_seconds", history.boundary_elapsed_seconds);
     write_scalar_int(file, "/timing/boundary_iterations", history.boundary_iterations);
     write_vector_double(file, "/timing/marching_cell_elapsed_seconds", history.cell_elapsed_seconds);
     write_vector_int(file, "/timing/marching_cell_iterations", history.cell_iterations);
     write_vector_int(file, "/timing/marching_cell_converged", history.cell_converged);
+    write_vector_double(file, "/timing/marching_cell_final_relative_change",
+                        history.cell_final_relative_change);
+    write_vector_double(file, "/timing/marching_cell_final_residual_relative",
+                        history.cell_final_residual_relative);
+    write_vector_double(file, "/timing/marching_cell_final_map_residual_norm",
+                        history.cell_final_map_residual_norm);
 
     if (history.adaptive_recycling_diagnostics_enabled) {
         file.createGroup("/adaptive");
