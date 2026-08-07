@@ -155,10 +155,29 @@ endif()
 add_executable(DCR_Main src/main.cpp)
 target_link_libraries(DCR_Main PRIVATE dcr_solver)
 
+add_executable(DCR_AlternatingSweep src/alternating_sweep_main.cpp)
+target_compile_definitions(DCR_AlternatingSweep PRIVATE
+    DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_include_directories(DCR_AlternatingSweep PRIVATE ${HDF5_INCLUDE_DIRS})
+target_link_libraries(DCR_AlternatingSweep PRIVATE dcr_solver)
+
+add_executable(DCR_NestedDiagnostic src/alternating_sweep_main.cpp)
+target_compile_definitions(DCR_NestedDiagnostic PRIVATE
+    DCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    DCR_NESTED_DIAGNOSTIC=1)
+target_include_directories(DCR_NestedDiagnostic PRIVATE ${HDF5_INCLUDE_DIRS})
+target_link_libraries(DCR_NestedDiagnostic PRIVATE dcr_solver)
+
+add_executable(check_alternating_controller tests/test_alternating_controller.cpp)
+target_include_directories(check_alternating_controller PRIVATE src)
+target_link_libraries(check_alternating_controller PRIVATE dcr_solver)
+
 # =========================================================
 # 5. Unit Testing
 # =========================================================
 enable_testing()
+
+add_test(NAME AlternatingControllerCheck COMMAND check_alternating_controller)
 
 if(EXISTS "${CMAKE_SOURCE_DIR}/tests/test_structure.cpp")
     add_executable(check_structure tests/test_structure.cpp)
