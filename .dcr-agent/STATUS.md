@@ -1,7 +1,7 @@
 # Current Status
 
 - Branch: `adaptive-recycling-closure`
-- Current commit before the pending collaboration commit: `f2ed6aa`
+- Numerical-work commit: `d9d1578`
 - Baseline case: fixed-Gamma 3.120 eV A2 trajectory loaded from the accepted 3.110 eV temperature-continuation checkpoint.
 - Current experiment: completed read-only diagnosis of the first `be_steady_operator_mismatch` reported at macro 79 in `nested_dcr_fixed_gamma_T3p120_A_activity_eps1e10_v2_optimized_from_T3p110`.
 - Changed relative to baseline: diagnostic logging only for the existing BE/steady identity detector; no trace de-weighting, timestep, Anderson, physical equation, merit, or convergence behavior change. The one-run forensic logging is disabled after capture.
